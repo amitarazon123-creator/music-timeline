@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Player Screen</title>
+</head>
+<body>
+  <h1>PLAYER SCREEN</h1>
+
+  <form id="joinForm">
+    <input id="roomCodeInput" type="text" placeholder="Room Code" />
+    <input id="nicknameInput" type="text" placeholder="Nickname" />
+    <button type="submit">Join</button>
+  </form>
+
+  <p id="status"></p>
+
+  <!-- Socket.io serves this file automatically, no need to install anything client-side -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+
+    socket.on('connect', () => {
+      console.log('connected');
+    });
+
+    document.getElementById('joinForm').addEventListener('submit', (event) => {
+      event.preventDefault();
+
+      const status = document.getElementById('status');
+      const code = document.getElementById('roomCodeInput').value;
+      const nickname = document.getElementById('nicknameInput').value.trim();
+
+      if (!nickname) {
+        status.textContent = 'Nickname is required.';
+        return;
+      }
+
+      socket.emit('joinRoom', { code, nickname }, (response) => {
+        if (response.error) {
+          status.textContent = response.error;
+        } else {
+          status.textContent = `Joined room ${response.code} as ${nickname}`;
+        }
+      });
+    });
+  </script>
+</body>
+</html>

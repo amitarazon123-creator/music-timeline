@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Host Screen</title>
+</head>
+<body>
+  <h1>HOST SCREEN</h1>
+
+  <button id="createRoomBtn">Create Room</button>
+
+  <div id="roomSection" hidden>
+    <h2>Room Code: <span id="roomCode">----</span></h2>
+
+    <div id="spotifyLoginSection">
+      <a id="spotifyLoginLink" href="#">Login with Spotify</a>
+      <p id="spotifyStatus"></p>
+    </div>
+
+    <div id="spotifyConnectedSection" hidden>
+      <p>Spotify connected</p>
+      <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
+      <button id="loadPlaylistBtn">Load Playlist</button>
+      <p id="playlistStatus"></p>
+    </div>
+
+    <h3>Players</h3>
+    <ul id="playerList"></ul>
+  </div>
+
+  <!-- Socket.io serves this file automatically, no need to install anything client-side -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let roomCode = null;
+
+    socket.on('connect', () => {
+      console.log('connected');
+    });
+
+    function renderPlayerList(players) {
+      const list = document.getElementById('playerList');
+      list.innerHTML = '';
+      players.forEach((player) => {
+        const li = document.createElement('li');
+        li.textContent = player.nickname;
+        list.appendChild(li);
+      });
+    }
+
+    function showRoom() {
+      document.getElementById('roomCode').textContent = roomCode;
+      document.getElementById('roomSection').hidden = false;
+    }
+
+    document.getElementById('createRoomBtn').addEventListener('click', () => {
+      socket.emit('createRoom', (response) => {
+        roomCode = response.code;
+        showRoom();
+      });
+    });
+
+    document.getElementById('spotifyLoginLink').addEventListener('click', (event) => {
+      event.preventDefault();
+      window.location.href = `/login?room=${roomCode}`;
+    });
+
+    document.getElementById('loadPlaylistBtn').addEventListener('click', () => {
+      const playlistUrl = document.getElementById('playlistUrlInput').value.trim();
+      const status = document.getElementById('playlistStatus');
+
+      if (!playlistUrl) {
+        status.textContent = 'Paste a playlist link first.';
+        return;
+      }
+
+      status.textContent = 'Loading...';
+
+      socket.emit('loadPlaylist', { roomCode, playlistUrl }, (response) => {
+        if (response.error) {
+          status.textContent = response.error;
+        } else {
+          status.textContent = `${response.count} songs loaded`;
+        }
+      });
+    });
+
+    // Fired by the server whenever a player joins or leaves this room
+    socket.on('playerListUpdate', renderPlayerList);
+
+    // If Spotify just redirected us back here, ?room= and ?spotify= will be set in the URL
+    const params = new URLSearchParams(window.location.search);
+    const spotifyResult = params.get('spotify');
+    const paramRoom = params.get('room');
+
+    if (paramRoom) {
+      roomCode = paramRoom;
+      showRoom();
+
+      // The page just fully reloaded, so this is a new socket connection - rejoin the
+      // room's channel so we keep getting live player list updates.
+      socket.emit('hostRejoin', roomCode, (response) => {
+        if (response && response.players) {
+          renderPlayerList(response.players);
+        }
+      });
+    }
+
+    if (spotifyResult === 'connected') {
+      document.getElementById('spotifyLoginSection').hidden = true;
+      document.getElementById('spotifyConnectedSection').hidden = false;
+    } else if (spotifyResult === 'error') {
+      document.getElementById('spotifyStatus').textContent = 'Spotify connection failed. Please try again.';
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(timeout 3 node server/index.js)",
+      "Bash(node -c server/index.js)",
+      "WebFetch(domain:open.spotify.com)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:community.spotify.com)",
+      "Bash(git add *)"
+    ]
+  }
+}
