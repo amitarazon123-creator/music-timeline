@@ -22,6 +22,11 @@
       <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
       <button id="loadPlaylistBtn">Load Playlist</button>
       <p id="playlistStatus"></p>
+
+      <button id="playRandomSongBtn" hidden>Play Random Song</button>
+      <button id="pauseBtn" hidden>Pause</button>
+      <p id="playStatus"></p>
+      <p id="premiumError" hidden style="color: red;">Spotify Premium is required to host a game.</p>
     </div>
 
     <h3>Players</h3>
@@ -30,9 +35,71 @@
 
   <!-- Socket.io serves this file automatically, no need to install anything client-side -->
   <script src="/socket.io/socket.io.js"></script>
+  <!-- Lets the browser become a controllable Spotify playback device -->
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
   <script>
     const socket = io();
     let roomCode = null;
+
+    // Web Playback SDK state
+    let sdkReady = false;
+    let spotifyConnected = false;
+    let playlistLoaded = false;
+    let deviceId = null;
+    let player = null;
+
+    // Called by the SDK's own script tag once it's finished loading
+    window.onSpotifyWebPlaybackSDKReady = () => {
+      sdkReady = true;
+      tryInitPlayer();
+    };
+
+    // Creates the Spotify.Player once we know both the SDK has loaded and the
+    // host has connected their Spotify account (order between the two varies).
+    function tryInitPlayer() {
+      if (!sdkReady || !spotifyConnected || !roomCode || player) return;
+
+      player = new Spotify.Player({
+        name: 'Music Timeline Host',
+        volume: 0.8,
+        // The SDK calls this every time it needs a fresh token; the server
+        // refreshes it under the hood if the stored one has expired.
+        getOAuthToken: (callback) => {
+          fetch(`/token?room=${roomCode}`)
+            .then((res) => res.json())
+            .then((data) => callback(data.accessToken))
+            .catch((err) => console.error('Failed to fetch token:', err));
+        },
+      });
+
+      player.addListener('ready', ({ device_id }) => {
+        deviceId = device_id;
+        updatePlayButtonVisibility();
+      });
+
+      player.addListener('not_ready', ({ device_id }) => {
+        if (device_id === deviceId) deviceId = null;
+      });
+
+      // Fires when the logged-in account isn't Premium (or otherwise can't stream)
+      player.addListener('account_error', () => {
+        document.getElementById('premiumError').hidden = false;
+      });
+
+      player.addListener('initialization_error', ({ message }) => {
+        console.error('Spotify player initialization error:', message);
+      });
+
+      player.addListener('authentication_error', ({ message }) => {
+        console.error('Spotify player authentication error:', message);
+      });
+
+      player.connect();
+    }
+
+    function updatePlayButtonVisibility() {
+      document.getElementById('playRandomSongBtn').hidden = !(playlistLoaded && deviceId);
+    }
 
     socket.on('connect', () => {
       console.log('connected');
@@ -81,8 +148,57 @@
           status.textContent = response.error;
         } else {
           status.textContent = `${response.count} songs loaded`;
+          playlistLoaded = true;
+          updatePlayButtonVisibility();
         }
       });
+    });
+
+    document.getElementById('playRandomSongBtn').addEventListener('click', () => {
+      const status = document.getElementById('playStatus');
+      status.textContent = 'Picking a song...';
+
+      socket.emit('playRandomSong', { roomCode }, async (response) => {
+        if (response.error) {
+          status.textContent = response.error;
+          return;
+        }
+
+        try {
+          const tokenRes = await fetch(`/token?room=${roomCode}`);
+          const { accessToken } = await tokenRes.json();
+
+          await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+            method: 'PUT',
+            headers: {
+              Authorization: `Bearer ${accessToken}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ uris: [response.uri] }),
+          });
+
+          status.textContent = 'Playing...';
+          document.getElementById('pauseBtn').hidden = false;
+        } catch (err) {
+          console.error('Failed to start playback:', err);
+          status.textContent = 'Failed to start playback.';
+        }
+      });
+    });
+
+    document.getElementById('pauseBtn').addEventListener('click', () => {
+      const status = document.getElementById('playStatus');
+
+      // player.pause() controls this SDK instance directly, no Web API call needed
+      player
+        .pause()
+        .then(() => {
+          status.textContent = 'Paused.';
+        })
+        .catch((err) => {
+          console.error('Failed to pause playback:', err);
+          status.textContent = 'Failed to pause playback.';
+        });
     });
 
     // Fired by the server whenever a player joins or leaves this room
@@ -109,6 +225,8 @@
     if (spotifyResult === 'connected') {
       document.getElementById('spotifyLoginSection').hidden = true;
       document.getElementById('spotifyConnectedSection').hidden = false;
+      spotifyConnected = true;
+      tryInitPlayer();
     } else if (spotifyResult === 'error') {
       document.getElementById('spotifyStatus').textContent = 'Spotify connection failed. Please try again.';
     }

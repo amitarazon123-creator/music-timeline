@@ -104,6 +104,7 @@ async function fetchAllPlaylistTracks(playlistId, accessToken) {
         artists: track.artists.map((artist) => artist.name).join(', '),
         year: track.album && track.album.release_date ? track.album.release_date.slice(0, 4) : null,
         uri: track.uri,
+        played: false,
       });
     }
 
@@ -189,6 +190,24 @@ app.get('/callback', async (req, res) => {
   }
 });
 
+// Called by the Web Playback SDK whenever it needs an access token. Refreshes
+// automatically via getValidAccessToken if the stored one has expired.
+app.get('/token', async (req, res) => {
+  const room = rooms.get(req.query.room);
+
+  if (!room || !room.spotify) {
+    return res.status(400).json({ error: 'Room not found or Spotify not connected.' });
+  }
+
+  try {
+    const accessToken = await getValidAccessToken(room);
+    res.json({ accessToken });
+  } catch (err) {
+    console.error('Failed to get access token:', err.response ? err.response.data : err.message);
+    res.status(500).json({ error: 'Failed to get access token.' });
+  }
+});
+
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
@@ -252,6 +271,28 @@ io.on('connection', (socket) => {
         callback({ error: 'Failed to load playlist from Spotify.' });
       }
     }
+  });
+
+  // Picks a random song the room hasn't played yet, marks it played, and hands
+  // back only the URI - the name/artist stay server-side until reveal is built.
+  socket.on('playRandomSong', ({ roomCode }, callback) => {
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback({ error: 'Room not found.' });
+      return;
+    }
+
+    const unplayed = room.songPool.filter((song) => !song.played);
+    if (unplayed.length === 0) {
+      callback({ error: 'No songs left in the pool.' });
+      return;
+    }
+
+    const song = unplayed[Math.floor(Math.random() * unplayed.length)];
+    song.played = true;
+
+    callback({ uri: song.uri });
   });
 
   socket.on('joinRoom', ({ code, nickname }, callback) => {

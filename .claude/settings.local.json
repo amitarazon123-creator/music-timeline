@@ -6,7 +6,10 @@
       "WebFetch(domain:open.spotify.com)",
       "WebFetch(domain:github.com)",
       "WebFetch(domain:community.spotify.com)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(echo \"exit code: $?\")",
+      "Bash(node server/index.js)",
+      "Bash(git commit -m ' *)"
     ]
   }
 }
