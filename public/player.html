@@ -15,14 +15,73 @@
 
   <p id="status"></p>
 
+  <div id="gameSection" hidden>
+    <h3>Your Timeline</h3>
+    <ol id="timelineList"></ol>
+
+    <div id="waitingSection">
+      <p>Waiting for the next song...</p>
+    </div>
+
+    <div id="guessSection" hidden>
+      <p>A song is playing! Where does it belong on your timeline?</p>
+      <select id="positionSelect"></select>
+      <button id="submitGuessBtn">Lock In Guess</button>
+    </div>
+
+    <div id="resultSection" hidden>
+      <p id="resultText"></p>
+    </div>
+  </div>
+
   <!-- Socket.io serves this file automatically, no need to install anything client-side -->
   <script src="/socket.io/socket.io.js"></script>
   <script>
     const socket = io();
+    let roomCode = null;
+    let timeline = [];
+    let hasGuessed = false;
+    let myNickname = null;
 
     socket.on('connect', () => {
       console.log('connected');
     });
+
+    function renderTimeline() {
+      const list = document.getElementById('timelineList');
+      list.innerHTML = '';
+      timeline.forEach((song) => {
+        const li = document.createElement('li');
+        li.textContent = `${song.year} - ${song.name} (${song.artists})`;
+        list.appendChild(li);
+      });
+    }
+
+    // Builds one dropdown option per gap in the timeline (before the first
+    // card, between each pair, and after the last one). Skips the gap between
+    // two cards that share a year - it's always redundant, since whenever it's
+    // a correct guess, both of its neighboring gaps are correct too.
+    function renderPositionOptions() {
+      const select = document.getElementById('positionSelect');
+      select.innerHTML = '';
+
+      for (let i = 0; i <= timeline.length; i++) {
+        if (i > 0 && i < timeline.length && timeline[i - 1].year === timeline[i].year) continue;
+
+        const option = document.createElement('option');
+        option.value = i;
+        if (timeline.length === 0) {
+          option.textContent = 'Only card';
+        } else if (i === 0) {
+          option.textContent = `Before ${timeline[0].year}`;
+        } else if (i === timeline.length) {
+          option.textContent = `After ${timeline[timeline.length - 1].year}`;
+        } else {
+          option.textContent = `Between ${timeline[i - 1].year} and ${timeline[i].year}`;
+        }
+        select.appendChild(option);
+      }
+    }
 
     document.getElementById('joinForm').addEventListener('submit', (event) => {
       event.preventDefault();
@@ -41,8 +100,75 @@
           status.textContent = response.error;
         } else {
           status.textContent = `Joined room ${response.code} as ${nickname}`;
+          roomCode = response.code;
+          myNickname = nickname;
+          timeline = response.timeline || [];
+          renderTimeline();
+          document.getElementById('gameSection').hidden = false;
+          document.getElementById('joinForm').hidden = true;
         }
       });
+    });
+
+    // Server tells us a song started playing without revealing what it is.
+    socket.on('roundStarted', () => {
+      hasGuessed = false;
+      renderPositionOptions();
+      document.getElementById('waitingSection').hidden = true;
+      document.getElementById('resultSection').hidden = true;
+      document.getElementById('guessSection').hidden = false;
+    });
+
+    document.getElementById('submitGuessBtn').addEventListener('click', () => {
+      if (hasGuessed) return;
+
+      const position = Number(document.getElementById('positionSelect').value);
+      socket.emit('submitGuess', { roomCode, position }, (response) => {
+        if (response.error) {
+          alert(response.error);
+          return;
+        }
+        hasGuessed = true;
+        document.getElementById('guessSection').hidden = true;
+        document.getElementById('waitingSection').hidden = false;
+        document.getElementById('waitingSection').querySelector('p').textContent = 'Guess locked in - waiting for reveal...';
+      });
+    });
+
+    socket.on('roundResult', ({ song, results, winners }) => {
+      const mine = results.find((result) => result.playerId === socket.id);
+      if (!mine) return;
+
+      timeline = mine.timeline;
+      renderTimeline();
+
+      const resultText = document.getElementById('resultText');
+      resultText.textContent = mine.correct
+        ? `Correct! ${song.name} (${song.artists}) - ${song.year}`
+        : `Wrong. ${song.name} (${song.artists}) was actually from ${song.year}.`;
+
+      document.getElementById('guessSection').hidden = true;
+      document.getElementById('resultSection').hidden = false;
+      document.getElementById('waitingSection').hidden = false;
+
+      let waitingText = 'Waiting for the next song...';
+      if (winners && winners.length > 0) {
+        waitingText = winners.includes(myNickname)
+          ? 'You won the game!'
+          : `${winners.join(' & ')} won the game!`;
+      }
+      document.getElementById('waitingSection').querySelector('p').textContent = waitingText;
+    });
+
+    // Server resets everyone's view when the host starts a new game.
+    socket.on('newGameStarted', () => {
+      timeline = [];
+      hasGuessed = false;
+      renderTimeline();
+      document.getElementById('guessSection').hidden = true;
+      document.getElementById('resultSection').hidden = true;
+      document.getElementById('waitingSection').hidden = false;
+      document.getElementById('waitingSection').querySelector('p').textContent = 'New game started - waiting for the next song...';
     });
   </script>
 </body>

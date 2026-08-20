@@ -12,6 +12,17 @@
   <div id="roomSection" hidden>
     <h2>Room Code: <span id="roomCode">----</span></h2>
 
+    <div id="winLengthSection">
+      <label for="winLengthSelect">Songs to win:</label>
+      <select id="winLengthSelect">
+        <option value="3">3</option>
+        <option value="5">5</option>
+        <option value="8">8</option>
+        <option value="10" selected>10</option>
+      </select>
+      <p id="winLengthStatus"></p>
+    </div>
+
     <div id="spotifyLoginSection">
       <a id="spotifyLoginLink" href="#">Login with Spotify</a>
       <p id="spotifyStatus"></p>
@@ -21,11 +32,16 @@
       <p>Spotify connected</p>
       <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
       <button id="loadPlaylistBtn">Load Playlist</button>
+      <button id="clearPlaylistBtn">Clear Playlist</button>
       <p id="playlistStatus"></p>
 
       <button id="playRandomSongBtn" hidden>Play Random Song</button>
       <button id="pauseBtn" hidden>Pause</button>
+      <button id="revealBtn" hidden>Reveal Song</button>
+      <button id="startNewGameBtn" hidden>Start New Game</button>
       <p id="playStatus"></p>
+      <p id="guessProgress"></p>
+      <p id="revealResult"></p>
       <p id="premiumError" hidden style="color: red;">Spotify Premium is required to host a game.</p>
     </div>
 
@@ -132,6 +148,17 @@
       window.location.href = `/login?room=${roomCode}`;
     });
 
+    document.getElementById('winLengthSelect').addEventListener('change', (event) => {
+      const winLength = event.target.value;
+      socket.emit('setWinLength', { roomCode, winLength }, (response) => {
+        document.getElementById('winLengthStatus').textContent = response.error || `Win length set to ${winLength}.`;
+      });
+    });
+
+    socket.on('winLengthUpdated', ({ winLength }) => {
+      document.getElementById('winLengthSelect').value = winLength;
+    });
+
     document.getElementById('loadPlaylistBtn').addEventListener('click', () => {
       const playlistUrl = document.getElementById('playlistUrlInput').value.trim();
       const status = document.getElementById('playlistStatus');
@@ -147,28 +174,56 @@
         if (response.error) {
           status.textContent = response.error;
         } else {
-          status.textContent = `${response.count} songs loaded`;
-          playlistLoaded = true;
+          status.textContent = `${response.added} new song${response.added === 1 ? '' : 's'} added (${response.count} total in bank)`;
+          playlistLoaded = response.count > 0;
           updatePlayButtonVisibility();
         }
       });
     });
 
+    document.getElementById('clearPlaylistBtn').addEventListener('click', () => {
+      const status = document.getElementById('playlistStatus');
+
+      socket.emit('clearPlaylist', { roomCode }, (response) => {
+        if (response.error) {
+          status.textContent = response.error;
+          return;
+        }
+        status.textContent = 'Song bank cleared. Load a playlist to keep playing.';
+        playlistLoaded = false;
+        updatePlayButtonVisibility();
+      });
+    });
+
     document.getElementById('playRandomSongBtn').addEventListener('click', () => {
+      const btn = document.getElementById('playRandomSongBtn');
       const status = document.getElementById('playStatus');
+
+      // Disabled immediately (not just after the server responds) so a second
+      // click can't slip in while this request is still in flight.
+      btn.disabled = true;
       status.textContent = 'Picking a song...';
 
       socket.emit('playRandomSong', { roomCode }, async (response) => {
         if (response.error) {
           status.textContent = response.error;
+          btn.disabled = false;
           return;
         }
+
+        // From here on the server already considers a round active (it won't
+        // allow another playRandomSong call until this one is revealed), so
+        // the reveal button goes live regardless of whether Spotify actually
+        // starts audio - that's the host's only way to unstick a failed round.
+        document.getElementById('revealBtn').hidden = false;
+        document.getElementById('guessProgress').textContent = '';
+        document.getElementById('revealResult').textContent = '';
 
         try {
           const tokenRes = await fetch(`/token?room=${roomCode}`);
           const { accessToken } = await tokenRes.json();
 
-          await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
+          const playRes = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
             method: 'PUT',
             headers: {
               Authorization: `Bearer ${accessToken}`,
@@ -177,13 +232,70 @@
             body: JSON.stringify({ uris: [response.uri] }),
           });
 
+          if (!playRes.ok) {
+            throw new Error(`Spotify playback request failed (${playRes.status})`);
+          }
+
           status.textContent = 'Playing...';
           document.getElementById('pauseBtn').hidden = false;
         } catch (err) {
           console.error('Failed to start playback:', err);
-          status.textContent = 'Failed to start playback.';
+          status.textContent = 'Failed to start Spotify playback - reveal to skip this round.';
         }
       });
+    });
+
+    socket.on('guessProgress', ({ guessedCount, totalPlayers }) => {
+      document.getElementById('guessProgress').textContent = `${guessedCount}/${totalPlayers} players have guessed`;
+    });
+
+    document.getElementById('revealBtn').addEventListener('click', () => {
+      socket.emit('revealSong', { roomCode }, (response) => {
+        if (response.error) {
+          document.getElementById('revealResult').textContent = response.error;
+          return;
+        }
+        document.getElementById('revealBtn').hidden = true;
+      });
+    });
+
+    socket.on('roundResult', ({ song, results, winners }) => {
+      const correctCount = results.filter((result) => result.correct).length;
+      const summary = results
+        .map((result) => `${result.nickname}: ${result.correct ? 'correct' : 'wrong'}`)
+        .join(', ');
+
+      let text = `${song.name} (${song.artists}), ${song.year} - ${correctCount}/${results.length} correct. ${summary}`;
+      if (winners && winners.length > 0) {
+        text += ` — ${winners.join(' & ')} ${winners.length > 1 ? 'win' : 'wins'} the game!`;
+        document.getElementById('playRandomSongBtn').hidden = true;
+        document.getElementById('startNewGameBtn').hidden = false;
+      } else {
+        document.getElementById('playRandomSongBtn').disabled = false;
+      }
+
+      document.getElementById('revealResult').textContent = text;
+      document.getElementById('guessProgress').textContent = '';
+    });
+
+    document.getElementById('startNewGameBtn').addEventListener('click', () => {
+      socket.emit('startNewGame', { roomCode }, (response) => {
+        if (response.error) {
+          document.getElementById('revealResult').textContent = response.error;
+        }
+      });
+    });
+
+    // Server confirms the reset to everyone in the room (host included).
+    socket.on('newGameStarted', () => {
+      document.getElementById('startNewGameBtn').hidden = true;
+      document.getElementById('revealBtn').hidden = true;
+      document.getElementById('pauseBtn').hidden = true;
+      document.getElementById('playRandomSongBtn').disabled = false;
+      document.getElementById('playStatus').textContent = '';
+      document.getElementById('guessProgress').textContent = '';
+      document.getElementById('revealResult').textContent = 'New game started!';
+      updatePlayButtonVisibility();
     });
 
     document.getElementById('pauseBtn').addEventListener('click', () => {
@@ -218,6 +330,9 @@
       socket.emit('hostRejoin', roomCode, (response) => {
         if (response && response.players) {
           renderPlayerList(response.players);
+        }
+        if (response && response.winLength) {
+          document.getElementById('winLengthSelect').value = response.winLength;
         }
       });
     }
