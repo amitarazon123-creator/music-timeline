@@ -37,11 +37,19 @@
 
       <button id="playRandomSongBtn" hidden>Play Random Song</button>
       <button id="pauseBtn" hidden>Pause</button>
-      <button id="revealBtn" hidden>Reveal Song</button>
+      <button id="revealBtn" hidden>Reveal</button>
       <button id="startNewGameBtn" hidden>Start New Game</button>
+      <p id="turnStatus"></p>
       <p id="playStatus"></p>
       <p id="guessProgress"></p>
       <p id="revealResult"></p>
+
+      <div id="tokenAwardSection" hidden>
+        <p>Did <span id="tokenAwardNickname"></span> correctly name the song and artist too?</p>
+        <button id="awardTokenBtn">Award Steal Token</button>
+        <button id="skipTokenBtn">No Token</button>
+      </div>
+
       <p id="premiumError" hidden style="color: red;">Spotify Premium is required to host a game.</p>
     </div>
 
@@ -63,6 +71,7 @@
     let playlistLoaded = false;
     let deviceId = null;
     let player = null;
+    let remainingSongs = 0;
 
     // Called by the SDK's own script tag once it's finished loading
     window.onSpotifyWebPlaybackSDKReady = () => {
@@ -114,7 +123,9 @@
     }
 
     function updatePlayButtonVisibility() {
-      document.getElementById('playRandomSongBtn').hidden = !(playlistLoaded && deviceId);
+      const btn = document.getElementById('playRandomSongBtn');
+      btn.hidden = !(playlistLoaded && deviceId);
+      btn.disabled = remainingSongs <= 0;
     }
 
     socket.on('connect', () => {
@@ -124,9 +135,9 @@
     function renderPlayerList(players) {
       const list = document.getElementById('playerList');
       list.innerHTML = '';
-      players.forEach((player) => {
+      players.forEach((p) => {
         const li = document.createElement('li');
-        li.textContent = player.nickname;
+        li.textContent = `${p.nickname} (${p.tokens} steal token${p.tokens === 1 ? '' : 's'})`;
         list.appendChild(li);
       });
     }
@@ -159,6 +170,11 @@
       document.getElementById('winLengthSelect').value = winLength;
     });
 
+    socket.on('starterCardsDealt', ({ dealt }) => {
+      const summary = dealt.map((d) => `${d.nickname}: ${d.song.year} - ${d.song.name}`).join(', ');
+      document.getElementById('revealResult').textContent = `Starter cards - ${summary}`;
+    });
+
     document.getElementById('loadPlaylistBtn').addEventListener('click', () => {
       const playlistUrl = document.getElementById('playlistUrlInput').value.trim();
       const status = document.getElementById('playlistStatus');
@@ -174,8 +190,9 @@
         if (response.error) {
           status.textContent = response.error;
         } else {
-          status.textContent = `${response.added} new song${response.added === 1 ? '' : 's'} added (${response.count} total in bank)`;
+          status.textContent = `${response.added} new song${response.added === 1 ? '' : 's'} added (${response.count} total in bank, ${response.remaining} playable)`;
           playlistLoaded = response.count > 0;
+          remainingSongs = response.remaining;
           updatePlayButtonVisibility();
         }
       });
@@ -191,6 +208,7 @@
         }
         status.textContent = 'Song bank cleared. Load a playlist to keep playing.';
         playlistLoaded = false;
+        remainingSongs = response.remaining;
         updatePlayButtonVisibility();
       });
     });
@@ -207,17 +225,29 @@
       socket.emit('playRandomSong', { roomCode }, async (response) => {
         if (response.error) {
           status.textContent = response.error;
-          btn.disabled = false;
+          btn.disabled = remainingSongs <= 0;
           return;
         }
 
-        // From here on the server already considers a round active (it won't
-        // allow another playRandomSong call until this one is revealed), so
-        // the reveal button goes live regardless of whether Spotify actually
-        // starts audio - that's the host's only way to unstick a failed round.
-        document.getElementById('revealBtn').hidden = false;
+        // First click of a fresh game just deals starter cards - no round
+        // started yet, so there's nothing to play on Spotify.
+        if (response.dealt) {
+          remainingSongs = response.remaining;
+          status.textContent = remainingSongs > 0
+            ? 'Starter cards dealt! Click Play Random Song again to start round 1.'
+            : 'Starter cards dealt, but the pool is now empty - load more songs before round 1.';
+          btn.disabled = remainingSongs <= 0;
+          return;
+        }
+
+        remainingSongs = response.remaining;
+        if (remainingSongs === 0) {
+          document.getElementById('playlistStatus').textContent = 'Song pool is empty - load a playlist to keep playing after this round.';
+        }
+        document.getElementById('turnStatus').textContent = `${response.activeNickname}'s turn to guess.`;
         document.getElementById('guessProgress').textContent = '';
         document.getElementById('revealResult').textContent = '';
+        document.getElementById('revealBtn').hidden = true;
 
         try {
           const tokenRes = await fetch(`/token?room=${roomCode}`);
@@ -240,45 +270,83 @@
           document.getElementById('pauseBtn').hidden = false;
         } catch (err) {
           console.error('Failed to start playback:', err);
-          status.textContent = 'Failed to start Spotify playback - reveal to skip this round.';
+          status.textContent = 'Failed to start Spotify playback - the round can still proceed once bets are in.';
         }
       });
     });
 
-    socket.on('guessProgress', ({ guessedCount, totalPlayers }) => {
-      document.getElementById('guessProgress').textContent = `${guessedCount}/${totalPlayers} players have guessed`;
+    // The active player locked in their bet - steal window is now open for
+    // everyone else. Reveal stays hidden until every decision is in.
+    socket.on('stealWindowOpened', ({ activeNickname }) => {
+      document.getElementById('turnStatus').textContent = `${activeNickname} locked in their bet. Waiting on steal decisions...`;
+      document.getElementById('revealBtn').hidden = true;
+    });
+
+    socket.on('stealProgress', ({ decided, total, complete }) => {
+      document.getElementById('guessProgress').textContent = total === 0
+        ? 'No one else can steal this round.'
+        : `${decided}/${total} players have decided`;
+      document.getElementById('revealBtn').hidden = !complete;
     });
 
     document.getElementById('revealBtn').addEventListener('click', () => {
       socket.emit('revealSong', { roomCode }, (response) => {
         if (response.error) {
           document.getElementById('revealResult').textContent = response.error;
-          return;
         }
-        document.getElementById('revealBtn').hidden = true;
       });
     });
 
-    socket.on('roundResult', ({ song, results, winners }) => {
-      const correctCount = results.filter((result) => result.correct).length;
-      const summary = results
-        .map((result) => `${result.nickname}: ${result.correct ? 'correct' : 'wrong'}`)
-        .join(', ');
+    socket.on('roundResult', ({ song, activePlayerId, activeNickname, activeCorrect, stealResults, tokenEligible, winners }) => {
+      let text = `${song.name} (${song.artists}), ${song.year} - `;
 
-      let text = `${song.name} (${song.artists}), ${song.year} - ${correctCount}/${results.length} correct. ${summary}`;
+      if (activeCorrect) {
+        text += `${activeNickname} got it right!`;
+      } else {
+        const stealers = stealResults.filter((result) => result.correct);
+        text += stealers.length > 0
+          ? `${activeNickname} missed it, but ${stealers.map((result) => result.nickname).join(' & ')} stole it!`
+          : `${activeNickname} missed it, and nobody stole it.`;
+      }
+
       if (winners && winners.length > 0) {
         text += ` — ${winners.join(' & ')} ${winners.length > 1 ? 'win' : 'wins'} the game!`;
         document.getElementById('playRandomSongBtn').hidden = true;
         document.getElementById('startNewGameBtn').hidden = false;
       } else {
-        document.getElementById('playRandomSongBtn').disabled = false;
+        document.getElementById('playRandomSongBtn').disabled = remainingSongs <= 0;
       }
 
       document.getElementById('revealResult').textContent = text;
+      document.getElementById('revealBtn').hidden = true;
       document.getElementById('guessProgress').textContent = '';
+
+      if (tokenEligible) {
+        document.getElementById('tokenAwardNickname').textContent = activeNickname;
+        document.getElementById('tokenAwardSection').hidden = false;
+        document.getElementById('tokenAwardSection').dataset.playerId = activePlayerId;
+      }
+    });
+
+    document.getElementById('awardTokenBtn').addEventListener('click', () => {
+      const playerId = document.getElementById('tokenAwardSection').dataset.playerId;
+      socket.emit('awardStealToken', { roomCode, playerId }, () => {
+        document.getElementById('tokenAwardSection').hidden = true;
+      });
+    });
+
+    document.getElementById('skipTokenBtn').addEventListener('click', () => {
+      document.getElementById('tokenAwardSection').hidden = true;
     });
 
     document.getElementById('startNewGameBtn').addEventListener('click', () => {
+      // The winning round's song may still be audibly playing - stop it now,
+      // since the pause button is about to disappear along with everything
+      // else from the finished game.
+      if (player) {
+        player.pause().catch((err) => console.error('Failed to pause playback:', err));
+      }
+
       socket.emit('startNewGame', { roomCode }, (response) => {
         if (response.error) {
           document.getElementById('revealResult').textContent = response.error;
@@ -287,11 +355,13 @@
     });
 
     // Server confirms the reset to everyone in the room (host included).
-    socket.on('newGameStarted', () => {
+    socket.on('newGameStarted', ({ remaining }) => {
+      remainingSongs = remaining;
       document.getElementById('startNewGameBtn').hidden = true;
       document.getElementById('revealBtn').hidden = true;
       document.getElementById('pauseBtn').hidden = true;
-      document.getElementById('playRandomSongBtn').disabled = false;
+      document.getElementById('tokenAwardSection').hidden = true;
+      document.getElementById('turnStatus').textContent = '';
       document.getElementById('playStatus').textContent = '';
       document.getElementById('guessProgress').textContent = '';
       document.getElementById('revealResult').textContent = 'New game started!';
@@ -313,7 +383,7 @@
         });
     });
 
-    // Fired by the server whenever a player joins or leaves this room
+    // Fired by the server whenever a player joins, leaves, or their token count changes
     socket.on('playerListUpdate', renderPlayerList);
 
     // If Spotify just redirected us back here, ?room= and ?spotify= will be set in the URL

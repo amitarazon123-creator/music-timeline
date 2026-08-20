@@ -33,7 +33,48 @@ function generateRoomCode() {
 
 // Turns a room's player Map into a plain array for sending over the socket
 function getPlayerList(room) {
-  return Array.from(room.players.entries()).map(([id, nickname]) => ({ id, nickname }));
+  return Array.from(room.players.entries()).map(([id, nickname]) => ({
+    id,
+    nickname,
+    tokens: room.game.tokens.get(id) || 0,
+  }));
+}
+
+// Opens the steal window right after the active player locks in their bet -
+// everyone else gets one shot to decide (steal or pass) before anything is
+// revealed. Also used as a safety valve if the active player disconnects
+// mid-turn, so the round can't get stuck waiting on someone who's gone.
+function openStealWindow(room, roomCode) {
+  room.game.phase = 'steal';
+  room.game.stealAttempts = new Map();
+
+  const activeTimeline = room.game.timelines.get(room.game.activePlayerId) || [];
+  const activeGuess = room.game.guesses.has(room.game.activePlayerId)
+    ? room.game.guesses.get(room.game.activePlayerId)
+    : null;
+  const stealOptions = computeStealOptions(activeTimeline, activeGuess); // [{ index, label }]
+  room.game.stealOptions = stealOptions.map((option) => option.index); // plain indices, for validation
+
+  room.game.pendingDecisions = new Set(
+    // Nothing left to bet on (the active player's guess covers the whole
+    // timeline) - skip requiring a pointless explicit pass from anyone.
+    stealOptions.length === 0 ? [] : Array.from(room.players.keys()).filter((id) => id !== room.game.activePlayerId)
+  );
+  room.game.stealDecisionTotal = room.game.pendingDecisions.size;
+
+  io.to(roomCode).emit('stealWindowOpened', {
+    activePlayerId: room.game.activePlayerId,
+    activeNickname: room.players.get(room.game.activePlayerId) || 'Unknown',
+    activeTimeline,
+    stealOptions,
+  });
+  emitStealProgress(room, roomCode);
+}
+
+function emitStealProgress(room, roomCode) {
+  const total = room.game.stealDecisionTotal;
+  const decided = total - room.game.pendingDecisions.size;
+  io.to(roomCode).emit('stealProgress', { decided, total, complete: room.game.pendingDecisions.size === 0 });
 }
 
 // Builds the Basic auth header Spotify wants for token requests
@@ -138,6 +179,116 @@ function isValidGuess(timeline, year, guessIndex) {
   return beforeOk && afterOk;
 }
 
+// A successful steal knows the song's exact year (that's the whole test), so
+// there's no ambiguity about where it belongs on the stealer's timeline.
+function correctInsertIndex(timeline, year) {
+  let index = 0;
+  for (const song of timeline) {
+    if (Number(song.year) <= Number(year)) index++;
+    else break;
+  }
+  return index;
+}
+
+// Every insertion index into a timeline, skipping the redundant zero-width
+// gap between two cards that share a year (mirrors the client's dropdown).
+function computeGapOptions(timeline) {
+  const options = [];
+  for (let i = 0; i <= timeline.length; i++) {
+    if (i > 0 && i < timeline.length && Number(timeline[i - 1].year) === Number(timeline[i].year)) continue;
+    options.push(i);
+  }
+  return options;
+}
+
+// A steal at `stealIndex` is correct if the song's year belongs there - EXCEPT
+// on whichever boundary is shared with the active player's own claimed gap,
+// where the tie-tolerant "<=" / ">=" tightens to a strict "<" / ">". That
+// shared year already counts as correct for the active player, so a stealer
+// can't also win with it - "the borders are in his favor".
+function isValidSteal(timeline, year, stealIndex, activeGuess) {
+  const songYear = Number(year);
+  const before = timeline[stealIndex - 1];
+  const after = timeline[stealIndex];
+  const hasClaim = activeGuess !== null && activeGuess !== undefined;
+
+  const beforeStrict = hasClaim && stealIndex === activeGuess + 1;
+  const afterStrict = hasClaim && stealIndex === activeGuess - 1;
+
+  const beforeOk = !before || (beforeStrict ? Number(before.year) < songYear : Number(before.year) <= songYear);
+  const afterOk = !after || (afterStrict ? songYear < Number(after.year) : songYear <= Number(after.year));
+
+  return beforeOk && afterOk;
+}
+
+// Builds the label for one steal option, shifting whichever boundary is
+// shared with the active player's claimed gap by one year so it reads as the
+// exclusive range it actually is (e.g. "2012 and before", not "Before 2013").
+function buildStealOptionLabel(timeline, index, beforeStrict, afterStrict) {
+  if (timeline.length === 0) return 'Only card';
+
+  if (index === 0) {
+    const upper = Number(timeline[0].year);
+    return afterStrict ? `${upper - 1} and before` : `Before ${upper}`;
+  }
+
+  if (index === timeline.length) {
+    const lower = Number(timeline[timeline.length - 1].year);
+    return beforeStrict ? `${lower + 1} and after` : `After ${lower}`;
+  }
+
+  const lowerYear = Number(timeline[index - 1].year);
+  const upperYear = Number(timeline[index].year);
+  const lowerLabel = beforeStrict ? lowerYear + 1 : lowerYear;
+  const upperLabel = afterStrict ? upperYear - 1 : upperYear;
+  return `Between ${lowerLabel} and ${upperLabel}`;
+}
+
+// Which gaps in the active player's timeline stealers may bet on: every gap
+// except their own exact claim (betting the identical range isn't a "steal"),
+// with the two neighboring gaps' labels/correctness tightened to exclude the
+// boundary year that gap shares with the claim.
+function computeStealOptions(activeTimeline, activeGuess) {
+  const allIndices = computeGapOptions(activeTimeline);
+  const hasClaim = activeGuess !== null && activeGuess !== undefined;
+
+  return allIndices
+    .filter((index) => !hasClaim || index !== activeGuess)
+    .map((index) => {
+      const beforeStrict = hasClaim && index === activeGuess + 1;
+      const afterStrict = hasClaim && index === activeGuess - 1;
+      return { index, label: buildStealOptionLabel(activeTimeline, index, beforeStrict, afterStrict) };
+    });
+}
+
+// Total songs still available for a normal round - used to gate the host's
+// "Play Random Song" button before they even click it, not just react after.
+function getUnplayedCount(room) {
+  return room.songPool.filter((song) => !song.played && song.year).length;
+}
+
+// Hands each currently-joined player one random distinct song as a free
+// starting card, so the very first turn isn't placing onto an empty
+// timeline. Runs once per game, right before the first real round.
+function dealStarterSongs(room) {
+  const dealt = [];
+
+  for (const playerId of room.game.turnOrder) {
+    const unplayed = room.songPool.filter((song) => !song.played && song.year);
+    if (unplayed.length === 0) break;
+
+    const song = unplayed[Math.floor(Math.random() * unplayed.length)];
+    song.played = true;
+
+    const card = { name: song.name, artists: song.artists, year: song.year };
+    room.game.timelines.set(playerId, [card]);
+    dealt.push({ playerId, nickname: room.players.get(playerId) || 'Unknown', song: card });
+  }
+
+  room.game.starterCardsDealt = true;
+  return dealt;
+}
+
 const DEFAULT_WIN_LENGTH = 10;
 const ALLOWED_WIN_LENGTHS = [3, 5, 8, 10];
 
@@ -235,7 +386,29 @@ io.on('connection', (socket) => {
       spotify: null,
       songPool: [],
       hostId: socket.id,
-      game: { currentSong: null, timelines: new Map(), guesses: new Map(), winners: [], winLength: DEFAULT_WIN_LENGTH },
+      game: {
+        currentSong: null,
+        timelines: new Map(),
+        guesses: new Map(),
+        tokens: new Map(),
+        winners: [],
+        winLength: DEFAULT_WIN_LENGTH,
+        // Turn-based play: turnOrder is join order, turnIndex advances every
+        // round (never resets on disconnect), and activePlayerId is whoever's
+        // turn the CURRENT round belongs to. phase is 'waiting' (no round),
+        // 'primary' (active player is placing their bet), or 'steal' (bet is
+        // locked in, everyone else is deciding whether to spend a token).
+        turnOrder: [],
+        turnIndex: 0,
+        activePlayerId: null,
+        phase: 'waiting',
+        starterCardsDealt: false,
+        // Steal window bookkeeping, live only during phase === 'steal'.
+        stealAttempts: new Map(), // playerId -> chosen gap index into the active player's timeline
+        stealOptions: [], // gap indices stealers are currently allowed to pick
+        pendingDecisions: new Set(), // playerIds who still owe a steal/pass decision
+        stealDecisionTotal: 0,
+      },
     });
 
     socket.join(code);
@@ -317,7 +490,7 @@ io.on('connection', (socket) => {
       const newSongs = songs.filter((song) => !existingUris.has(song.uri));
       room.songPool = shuffle([...room.songPool, ...newSongs]);
 
-      callback({ count: room.songPool.length, added: newSongs.length });
+      callback({ count: room.songPool.length, added: newSongs.length, remaining: getUnplayedCount(room) });
     } catch (err) {
       console.error('Failed to load playlist:', err.response ? err.response.data : err.message);
 
@@ -345,11 +518,11 @@ io.on('connection', (socket) => {
     }
 
     room.songPool = [];
-    callback({ success: true });
+    callback({ success: true, remaining: 0 });
   });
 
   // Picks a random song the room hasn't played yet, marks it played, and hands
-  // back only the URI - the name/artist stay server-side until reveal is built.
+  // back only the URI - the name/artist stay server-side until reveal.
   socket.on('playRandomSong', ({ roomCode }, callback) => {
     const room = rooms.get(roomCode);
 
@@ -377,6 +550,11 @@ io.on('connection', (socket) => {
       return;
     }
 
+    if (room.game.turnOrder.length === 0) {
+      callback({ error: 'Need at least one player before starting a round.' });
+      return;
+    }
+
     // Songs without a release year can't be placed on a timeline, so skip them.
     const unplayed = room.songPool.filter((song) => !song.played && song.year);
     if (unplayed.length === 0) {
@@ -384,14 +562,41 @@ io.on('connection', (socket) => {
       return;
     }
 
+    // First call of a fresh game: hand everyone a free starter card instead
+    // of opening with a blind placement onto an empty timeline. This click
+    // just deals - the host clicks again to actually start round 1. Refuses
+    // to deal at all unless there's enough for every player, so nobody ends
+    // up starting the game short a card.
+    if (!room.game.starterCardsDealt) {
+      if (unplayed.length < room.game.turnOrder.length) {
+        callback({
+          error: `Need at least ${room.game.turnOrder.length} songs in the pool for starter cards (have ${unplayed.length}) - load more first.`,
+        });
+        return;
+      }
+
+      const dealt = dealStarterSongs(room);
+      io.to(roomCode).emit('starterCardsDealt', { dealt });
+      callback({ dealt: true, remaining: getUnplayedCount(room) });
+      return;
+    }
+
     const song = unplayed[Math.floor(Math.random() * unplayed.length)];
     song.played = true;
 
-    room.game.currentSong = song;
-    room.game.guesses = new Map();
+    const activePlayerId = room.game.turnOrder[room.game.turnIndex % room.game.turnOrder.length];
+    const activeNickname = room.players.get(activePlayerId) || 'Unknown';
+    room.game.turnIndex += 1;
 
-    callback({ uri: song.uri });
-    io.to(roomCode).emit('roundStarted');
+    room.game.currentSong = song;
+    room.game.activePlayerId = activePlayerId;
+    room.game.phase = 'primary';
+    room.game.guesses = new Map();
+    room.game.stealAttempts = new Map();
+    room.game.pendingDecisions = new Set();
+
+    callback({ uri: song.uri, activePlayerId, activeNickname, remaining: getUnplayedCount(room) });
+    io.to(roomCode).emit('roundStarted', { activePlayerId, activeNickname });
   });
 
   socket.on('joinRoom', ({ code, nickname }, callback) => {
@@ -419,6 +624,12 @@ io.on('connection', (socket) => {
         previousRoom.players.delete(socket.id);
         previousRoom.game.timelines.delete(socket.id);
         previousRoom.game.guesses.delete(socket.id);
+        previousRoom.game.tokens.delete(socket.id);
+        previousRoom.game.stealAttempts.delete(socket.id);
+        previousRoom.game.turnOrder = previousRoom.game.turnOrder.filter((id) => id !== socket.id);
+        if (previousRoom.game.pendingDecisions.delete(socket.id)) {
+          emitStealProgress(previousRoom, previousRoomCode);
+        }
         socket.leave(previousRoomCode);
         io.to(previousRoomCode).emit('playerListUpdate', getPlayerList(previousRoom));
       }
@@ -426,15 +637,21 @@ io.on('connection', (socket) => {
 
     room.players.set(socket.id, trimmedNickname);
     room.game.timelines.set(socket.id, []);
+    room.game.tokens.set(socket.id, 0);
+    if (!room.game.turnOrder.includes(socket.id)) {
+      room.game.turnOrder.push(socket.id);
+    }
     socket.join(roomCode);
     socket.data.roomCode = roomCode;
 
     io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
-    callback({ success: true, code: roomCode, timeline: [] });
+    callback({ success: true, code: roomCode, timeline: [], tokens: 0 });
   });
 
-  // A player locks in where they think the currently-playing song belongs on
-  // their own timeline. `position` is an insertion index into that timeline.
+  // The active player locks in where they think the currently-playing song
+  // belongs on their own timeline. Submitting this immediately opens the
+  // steal window for everyone else - nobody (including the active player)
+  // learns whether it was actually correct until the reveal.
   socket.on('submitGuess', ({ roomCode, position }, callback) => {
     const room = rooms.get(roomCode);
 
@@ -448,13 +665,13 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!room.game.currentSong) {
-      callback({ error: 'No song is currently playing.' });
+    if (!room.game.currentSong || room.game.phase !== 'primary') {
+      callback({ error: 'No bet to place right now.' });
       return;
     }
 
-    if (room.game.guesses.has(socket.id)) {
-      callback({ error: 'You already guessed this round.' });
+    if (socket.id !== room.game.activePlayerId) {
+      callback({ error: "It's not your turn." });
       return;
     }
 
@@ -462,18 +679,103 @@ io.on('connection', (socket) => {
     const clamped = Math.max(0, Math.min(Number(position), timeline.length));
     room.game.guesses.set(socket.id, clamped);
 
-    if (room.hostId) {
-      io.to(room.hostId).emit('guessProgress', {
-        guessedCount: room.game.guesses.size,
-        totalPlayers: room.players.size,
-      });
-    }
-
+    openStealWindow(room, roomCode);
     callback({ success: true });
   });
 
-  // Host-triggered: scores every player's guess against the actual song, grows
-  // each correct player's timeline, and broadcasts the outcome to the room.
+  // A non-active player spends a steal token to bet on one of the active
+  // player's own timeline gaps (excluding the one the active player already
+  // claimed, plus its neighbors) - if the active player's bet turns out
+  // wrong and this gap is where the song actually belongs, the steal wins.
+  socket.on('submitSteal', ({ roomCode, position }, callback) => {
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback({ error: 'Room not found.' });
+      return;
+    }
+
+    if (!room.players.has(socket.id)) {
+      callback({ error: 'Only players can steal.' });
+      return;
+    }
+
+    if (room.game.phase !== 'steal') {
+      callback({ error: 'No steal window is open right now.' });
+      return;
+    }
+
+    if (socket.id === room.game.activePlayerId) {
+      callback({ error: "You can't steal on your own turn." });
+      return;
+    }
+
+    if (!room.game.pendingDecisions.has(socket.id)) {
+      callback({ error: 'You already decided this round.' });
+      return;
+    }
+
+    const chosen = Number(position);
+    if (!room.game.stealOptions.includes(chosen)) {
+      callback({ error: 'That spot is off-limits this round.' });
+      return;
+    }
+
+    const tokens = room.game.tokens.get(socket.id) || 0;
+    if (tokens <= 0) {
+      callback({ error: "You don't have a steal token." });
+      return;
+    }
+
+    room.game.tokens.set(socket.id, tokens - 1);
+    room.game.stealAttempts.set(socket.id, chosen);
+    room.game.pendingDecisions.delete(socket.id);
+
+    callback({ success: true, tokens: tokens - 1 });
+    emitStealProgress(room, roomCode);
+  });
+
+  // A non-active player explicitly declines to steal - free, no token cost.
+  socket.on('passSteal', ({ roomCode }, callback) => {
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback({ error: 'Room not found.' });
+      return;
+    }
+
+    if (!room.players.has(socket.id)) {
+      callback({ error: 'Only players can decide this.' });
+      return;
+    }
+
+    if (room.game.phase !== 'steal') {
+      callback({ error: 'No steal window is open right now.' });
+      return;
+    }
+
+    if (socket.id === room.game.activePlayerId) {
+      callback({ error: "You can't steal on your own turn." });
+      return;
+    }
+
+    if (!room.game.pendingDecisions.has(socket.id)) {
+      callback({ error: 'You already decided this round.' });
+      return;
+    }
+
+    room.game.pendingDecisions.delete(socket.id);
+    callback({ success: true });
+    emitStealProgress(room, roomCode);
+  });
+
+  // Host-triggered, only once every steal decision is in. Scores the active
+  // player's bet; if they missed, checks every steal attempt's chosen gap
+  // against the real year, using the SAME active-player timeline the
+  // stealers saw (frozen since the steal window opened - nothing gets added
+  // to it unless the active player was right, which disqualifies stealers
+  // anyway). A steal token is spent the instant it's used (submitSteal), win
+  // or lose - there's nothing left to deduct here.
   socket.on('revealSong', ({ roomCode }, callback) => {
     const room = rooms.get(roomCode);
 
@@ -493,49 +795,113 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const results = [];
+    if (room.game.phase !== 'steal') {
+      callback({ error: "Waiting for the active player's bet." });
+      return;
+    }
+
+    if (room.game.pendingDecisions.size > 0) {
+      callback({ error: 'Still waiting on steal decisions.' });
+      return;
+    }
+
+    const activePlayerId = room.game.activePlayerId;
+    const activeNickname = room.players.get(activePlayerId) || 'Unknown';
+    const activeTimeline = room.game.timelines.get(activePlayerId) || [];
+    const activeGuess = room.game.guesses.has(activePlayerId) ? room.game.guesses.get(activePlayerId) : null;
+    const activeCorrect = activeGuess !== null && isValidGuess(activeTimeline, song.year, activeGuess);
+
     const winners = [];
-    for (const [playerId, nickname] of room.players.entries()) {
-      const timeline = room.game.timelines.get(playerId) || [];
-      const guess = room.game.guesses.has(playerId) ? room.game.guesses.get(playerId) : null;
-      const correct = guess !== null && isValidGuess(timeline, song.year, guess);
+
+    if (activeCorrect) {
+      const updatedTimeline = [...activeTimeline];
+      updatedTimeline.splice(activeGuess, 0, { name: song.name, artists: song.artists, year: song.year });
+      room.game.timelines.set(activePlayerId, updatedTimeline);
+      if (updatedTimeline.length >= room.game.winLength) winners.push(activeNickname);
+    }
+
+    // Steal attempts only matter if the active player missed - otherwise
+    // every attempt was already a spent token for nothing.
+    const stealResults = [];
+    for (const [playerId, position] of room.game.stealAttempts.entries()) {
+      const nickname = room.players.get(playerId) || 'Unknown';
+      const correct = !activeCorrect && isValidSteal(activeTimeline, song.year, position, activeGuess);
 
       if (correct) {
+        const timeline = room.game.timelines.get(playerId) || [];
         const updatedTimeline = [...timeline];
-        updatedTimeline.splice(guess, 0, { name: song.name, artists: song.artists, year: song.year });
+        updatedTimeline.splice(correctInsertIndex(timeline, song.year), 0, {
+          name: song.name,
+          artists: song.artists,
+          year: song.year,
+        });
         room.game.timelines.set(playerId, updatedTimeline);
-
-        // Everyone who crosses the line in the same round wins together - no
-        // "first past the post" tiebreak among simultaneous winners.
-        if (updatedTimeline.length >= room.game.winLength) {
-          winners.push(nickname);
-        }
+        if (updatedTimeline.length >= room.game.winLength) winners.push(nickname);
       }
 
-      results.push({
+      stealResults.push({
         playerId,
         nickname,
-        guess,
+        position,
         correct,
         timeline: room.game.timelines.get(playerId) || [],
       });
     }
 
     room.game.currentSong = null;
+    room.game.phase = 'waiting';
     room.game.guesses = new Map();
+    room.game.stealAttempts = new Map();
+    room.game.stealOptions = [];
+    room.game.pendingDecisions = new Set();
     if (winners.length > 0) room.game.winners = winners;
 
     io.to(roomCode).emit('roundResult', {
       song: { name: song.name, artists: song.artists, year: song.year },
-      results,
+      activePlayerId,
+      activeNickname,
+      activeCorrect,
+      activeTimeline: room.game.timelines.get(activePlayerId) || [],
+      tokenEligible: activeCorrect,
+      stealResults,
       winners,
     });
 
     callback({ success: true });
   });
 
-  // Host-only: resets scores/timelines and re-opens the whole song bank so the
-  // same room can play another game without redoing Spotify login or playlists.
+  // Host-only, called after a reveal where the active player was correct.
+  // The app can't verify they said the song's name/artist out loud, so this
+  // is a manual judgment call - clicking it is the "approval".
+  socket.on('awardStealToken', ({ roomCode, playerId }, callback) => {
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback({ error: 'Room not found.' });
+      return;
+    }
+
+    if (socket.id !== room.hostId) {
+      callback({ error: 'Only the host can award steal tokens.' });
+      return;
+    }
+
+    if (!room.players.has(playerId)) {
+      callback({ error: 'Player not found.' });
+      return;
+    }
+
+    const tokens = (room.game.tokens.get(playerId) || 0) + 1;
+    room.game.tokens.set(playerId, tokens);
+
+    io.to(playerId).emit('tokensUpdated', { tokens });
+    io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
+    callback({ success: true, tokens });
+  });
+
+  // Host-only: resets scores/timelines/tokens and re-opens the whole song bank
+  // so the same room can play another game without redoing Spotify login or
+  // playlists.
   socket.on('startNewGame', ({ roomCode }, callback) => {
     const room = rooms.get(roomCode);
 
@@ -555,15 +921,28 @@ io.on('connection', (socket) => {
 
     room.game.currentSong = null;
     room.game.guesses = new Map();
+    room.game.stealAttempts = new Map();
+    room.game.stealOptions = [];
+    room.game.pendingDecisions = new Set();
+    room.game.stealDecisionTotal = 0;
     room.game.winners = [];
+    room.game.phase = 'waiting';
+    room.game.activePlayerId = null;
+    room.game.starterCardsDealt = false;
+    room.game.turnOrder = Array.from(room.players.keys());
+    room.game.turnIndex = 0;
 
     const freshTimelines = new Map();
+    const freshTokens = new Map();
     for (const playerId of room.players.keys()) {
       freshTimelines.set(playerId, []);
+      freshTokens.set(playerId, 0);
     }
     room.game.timelines = freshTimelines;
+    room.game.tokens = freshTokens;
 
-    io.to(roomCode).emit('newGameStarted');
+    io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
+    io.to(roomCode).emit('newGameStarted', { remaining: getUnplayedCount(room) });
     callback({ success: true });
   });
 
@@ -575,6 +954,19 @@ io.on('connection', (socket) => {
 
     if (room && room.players.has(socket.id)) {
       room.players.delete(socket.id);
+      room.game.turnOrder = room.game.turnOrder.filter((id) => id !== socket.id);
+
+      // Don't let a vanished player permanently block the steal window.
+      if (room.game.phase === 'steal' && room.game.pendingDecisions.delete(socket.id)) {
+        emitStealProgress(room, roomCode);
+      }
+
+      // Or, if they were mid-turn and never placed their bet, open the steal
+      // window anyway (as an auto-miss) so the round isn't stuck forever.
+      if (room.game.phase === 'primary' && room.game.activePlayerId === socket.id) {
+        openStealWindow(room, roomCode);
+      }
+
       io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
     }
   });
