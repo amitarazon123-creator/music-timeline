@@ -2,59 +2,74 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Host Screen</title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <h1>HOST SCREEN</h1>
+  <h1>Music Timeline &mdash; Host</h1>
 
-  <button id="createRoomBtn">Create Room</button>
+  <div class="wrap">
+    <button id="createRoomBtn">Create Room</button>
 
-  <div id="roomSection" hidden>
-    <h2>Room Code: <span id="roomCode">----</span></h2>
-
-    <div id="winLengthSection">
-      <label for="winLengthSelect">Songs to win:</label>
-      <select id="winLengthSelect">
-        <option value="3">3</option>
-        <option value="5">5</option>
-        <option value="8">8</option>
-        <option value="10" selected>10</option>
-      </select>
-      <p id="winLengthStatus"></p>
-    </div>
-
-    <div id="spotifyLoginSection">
-      <a id="spotifyLoginLink" href="#">Login with Spotify</a>
-      <p id="spotifyStatus"></p>
-    </div>
-
-    <div id="spotifyConnectedSection" hidden>
-      <p>Spotify connected</p>
-      <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
-      <button id="loadPlaylistBtn">Load Playlist</button>
-      <button id="clearPlaylistBtn">Clear Playlist</button>
-      <p id="playlistStatus"></p>
-
-      <button id="playRandomSongBtn" hidden>Play Random Song</button>
-      <button id="pauseBtn" hidden>Pause</button>
-      <button id="revealBtn" hidden>Reveal</button>
-      <button id="startNewGameBtn" hidden>Start New Game</button>
-      <p id="turnStatus"></p>
-      <p id="playStatus"></p>
-      <p id="guessProgress"></p>
-      <p id="revealResult"></p>
-
-      <div id="tokenAwardSection" hidden>
-        <p>Did <span id="tokenAwardNickname"></span> correctly name the song and artist too?</p>
-        <button id="awardTokenBtn">Award Steal Token</button>
-        <button id="skipTokenBtn">No Token</button>
+    <div id="roomSection" hidden class="stack">
+      <div class="card room-code">
+        <label>Room Code</label>
+        <div class="code" id="roomCode">----</div>
       </div>
 
-      <p id="premiumError" hidden style="color: red;">Spotify Premium is required to host a game.</p>
-    </div>
+      <div id="winLengthSection" class="card row">
+        <label for="winLengthSelect" style="flex: none;">Songs to win</label>
+        <select id="winLengthSelect" style="flex: none; width: auto;">
+          <option value="3">3</option>
+          <option value="5">5</option>
+          <option value="8">8</option>
+          <option value="10" selected>10</option>
+        </select>
+        <p id="winLengthStatus" class="status-text" style="flex-basis: 100%;"></p>
+      </div>
 
-    <h3>Players</h3>
-    <ul id="playerList"></ul>
+      <div id="spotifyLoginSection" class="card center-text">
+        <a id="spotifyLoginLink" href="#" class="btn-link">Login with Spotify</a>
+        <p id="spotifyStatus" class="status-text"></p>
+      </div>
+
+      <div id="spotifyConnectedSection" hidden class="card stack">
+        <span class="badge"><span class="dot"></span> Spotify connected</span>
+        <div class="row">
+          <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
+          <button id="loadPlaylistBtn" style="flex: none;">Load</button>
+          <button id="clearPlaylistBtn" class="secondary" style="flex: none;">Clear</button>
+        </div>
+        <p id="playlistStatus" class="status-text"></p>
+
+        <div class="row">
+          <button id="playRandomSongBtn" hidden>Play Random Song</button>
+          <button id="pauseBtn" hidden class="secondary">Pause</button>
+          <button id="revealBtn" hidden>Reveal</button>
+          <button id="startNewGameBtn" hidden>Start New Game</button>
+        </div>
+        <p id="turnStatus" class="status-text"></p>
+        <p id="playStatus" class="status-text"></p>
+        <p id="guessProgress" class="status-text"></p>
+        <p id="revealResult" class="status-text"></p>
+
+        <div id="tokenAwardSection" hidden class="card stack" style="background: var(--bg-elevated);">
+          <p>Did <span id="tokenAwardNickname"></span> correctly name the song and artist too?</p>
+          <div class="row">
+            <button id="awardTokenBtn">Award Steal Token</button>
+            <button id="skipTokenBtn" class="secondary">No Token</button>
+          </div>
+        </div>
+
+        <p id="premiumError" hidden class="status-text error">Spotify Premium is required to host a game.</p>
+      </div>
+
+      <div class="card">
+        <h3>Players</h3>
+        <ul id="playerList"></ul>
+      </div>
+    </div>
   </div>
 
   <!-- Socket.io serves this file automatically, no need to install anything client-side -->

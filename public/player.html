@@ -2,44 +2,50 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Player Screen</title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
-  <h1>PLAYER SCREEN</h1>
+  <h1>Music Timeline</h1>
 
-  <form id="joinForm">
-    <input id="roomCodeInput" type="text" placeholder="Room Code" />
-    <input id="nicknameInput" type="text" placeholder="Nickname" />
-    <button type="submit">Join</button>
-  </form>
+  <div class="wrap">
+    <form id="joinForm" class="card stack">
+      <input id="roomCodeInput" type="text" placeholder="Room Code" autocomplete="off" autocapitalize="characters" />
+      <input id="nicknameInput" type="text" placeholder="Nickname" autocomplete="off" />
+      <button type="submit">Join Room</button>
+    </form>
 
-  <p id="status"></p>
+    <p id="status" class="status-text center-text"></p>
 
-  <div id="gameSection" hidden>
-    <p>Steal tokens: <span id="tokenCount">0</span></p>
+    <div id="gameSection" hidden class="stack">
+      <div class="card row" style="justify-content: space-between;">
+        <h3 style="margin: 0;">Your Timeline</h3>
+        <span class="badge"><span class="dot"></span> <span id="tokenCount">0</span> token(s)</span>
+      </div>
 
-    <h3>Your Timeline</h3>
-    <ol id="timelineList"></ol>
+      <ol id="timelineList" class="card"></ol>
 
-    <div id="waitingSection">
-      <p>Waiting for the next song...</p>
-    </div>
+      <div id="waitingSection" class="card center-text muted">
+        <p>Waiting for the next song...</p>
+      </div>
 
-    <div id="guessSection" hidden>
-      <p id="guessPrompt">A song is playing! Where does it belong on your timeline?</p>
-      <select id="positionSelect"></select>
-      <button id="submitGuessBtn">Lock In Guess</button>
-    </div>
+      <div id="guessSection" hidden class="card stack">
+        <p id="guessPrompt">A song is playing! Where does it belong on your timeline?</p>
+        <select id="positionSelect"></select>
+        <button id="submitGuessBtn">Lock In Guess</button>
+      </div>
 
-    <div id="stealSection" hidden>
-      <p id="stealPrompt">Someone else's turn. Want to try to steal it?</p>
-      <select id="stealPositionSelect"></select>
-      <button id="submitStealBtn">Steal (costs 1 token)</button>
-      <button id="passStealBtn">Don't Steal</button>
-    </div>
+      <div id="stealSection" hidden class="card stack">
+        <p id="stealPrompt">Someone else's turn. Want to try to steal it?</p>
+        <select id="stealPositionSelect"></select>
+        <button id="submitStealBtn">Steal (costs 1 token)</button>
+        <button id="passStealBtn" class="secondary">Don't Steal</button>
+      </div>
 
-    <div id="resultSection" hidden>
-      <p id="resultText"></p>
+      <div id="resultSection" hidden class="card">
+        <p id="resultText"></p>
+      </div>
     </div>
   </div>
 

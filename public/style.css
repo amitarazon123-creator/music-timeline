@@ -1,0 +1,295 @@
+:root {
+  --bg: #0b0f14;
+  --bg-elevated: #141b23;
+  --card: #1a222c;
+  --card-border: #263041;
+  --text: #eef2f6;
+  --text-dim: #9aa7b5;
+  --accent: #1db954;
+  --accent-hover: #1ed760;
+  --accent-text: #05130a;
+  --danger: #e5484d;
+  --warn: #e5b93d;
+  --radius: 14px;
+  --radius-sm: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+  background: radial-gradient(circle at top, #182028 0%, var(--bg) 55%);
+  color: var(--text);
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  line-height: 1.4;
+  padding: 24px 16px 64px;
+}
+
+h1 {
+  font-size: 1.4rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: center;
+  margin: 0 0 20px;
+}
+
+h2, h3 {
+  margin: 0 0 12px;
+}
+
+.wrap {
+  max-width: 520px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 18px;
+}
+
+button {
+  font: inherit;
+  cursor: pointer;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 12px 18px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  transition: background 0.15s ease, opacity 0.15s ease, transform 0.1s ease;
+  min-height: 44px;
+}
+
+button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button.secondary {
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--card-border);
+}
+
+button.secondary:hover:not(:disabled) {
+  background: #1c2530;
+}
+
+button.danger {
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+}
+
+input, select {
+  font: inherit;
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  min-height: 44px;
+  width: 100%;
+}
+
+input::placeholder {
+  color: var(--text-dim);
+}
+
+input:focus, select:focus, button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+label {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.row > * {
+  flex: 1;
+}
+
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.status-text {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  min-height: 1.2em;
+  margin: 4px 0 0;
+}
+
+.status-text.error {
+  color: var(--danger);
+}
+
+/* Room code hero */
+.room-code {
+  text-align: center;
+}
+
+.room-code .code {
+  display: inline-block;
+  font-size: 2.4rem;
+  font-weight: 700;
+  letter-spacing: 0.25em;
+  color: var(--accent);
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 22px;
+  margin-top: 6px;
+}
+
+/* Player list */
+#playerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#playerList li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.95rem;
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.badge .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* Timeline (player view) */
+#timelineList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#timelineList li {
+  background: var(--bg-elevated);
+  border: 1px solid var(--card-border);
+  border-left: 4px solid var(--accent);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 0.95rem;
+}
+
+#timelineList:empty::after {
+  content: 'No cards yet.';
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  border: 1px dashed var(--card-border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  text-align: center;
+}
+
+/* Round sections */
+#guessSection, #stealSection {
+  border-color: var(--accent);
+}
+
+#stealSection {
+  border-color: var(--warn);
+}
+
+#resultSection {
+  text-align: center;
+  font-weight: 600;
+}
+
+.center-text {
+  text-align: center;
+}
+
+.muted {
+  color: var(--text-dim);
+}
+
+.btn-link {
+  display: inline-block;
+  text-decoration: none;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: 12px 18px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  min-height: 44px;
+  line-height: 20px;
+  transition: background 0.15s ease;
+}
+
+.btn-link:hover {
+  background: var(--accent-hover);
+}
+
+@media (min-width: 600px) {
+  .wrap {
+    max-width: 640px;
+  }
+}
