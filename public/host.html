@@ -87,6 +87,12 @@
     let deviceId = null;
     let player = null;
     let remainingSongs = 0;
+    // Whether a round is currently live (primary or steal phase) - kept as
+    // its own flag so updatePlayButtonVisibility can't be tricked into
+    // re-enabling "Play Random Song" by an unrelated event (like the Spotify
+    // SDK's device becoming "ready" mid-round) firing after the round itself
+    // already disabled it.
+    let roundActive = false;
 
     // Called by the SDK's own script tag once it's finished loading
     window.onSpotifyWebPlaybackSDKReady = () => {
@@ -140,7 +146,7 @@
     function updatePlayButtonVisibility() {
       const btn = document.getElementById('playRandomSongBtn');
       btn.hidden = !(playlistLoaded && deviceId);
-      btn.disabled = remainingSongs <= 0;
+      btn.disabled = remainingSongs <= 0 || roundActive;
     }
 
     socket.on('connect', () => {
@@ -152,7 +158,7 @@
       list.innerHTML = '';
       players.forEach((p) => {
         const li = document.createElement('li');
-        li.textContent = `${p.nickname} (${p.tokens} steal token${p.tokens === 1 ? '' : 's'})`;
+        li.textContent = p.nickname;
         list.appendChild(li);
       });
     }
@@ -240,7 +246,7 @@
       socket.emit('playRandomSong', { roomCode }, async (response) => {
         if (response.error) {
           status.textContent = response.error;
-          btn.disabled = remainingSongs <= 0;
+          updatePlayButtonVisibility();
           return;
         }
 
@@ -251,11 +257,12 @@
           status.textContent = remainingSongs > 0
             ? 'Starter cards dealt! Click Play Random Song again to start round 1.'
             : 'Starter cards dealt, but the pool is now empty - load more songs before round 1.';
-          btn.disabled = remainingSongs <= 0;
+          updatePlayButtonVisibility();
           return;
         }
 
         remainingSongs = response.remaining;
+        roundActive = true;
         if (remainingSongs === 0) {
           document.getElementById('playlistStatus').textContent = 'Song pool is empty - load a playlist to keep playing after this round.';
         }
@@ -313,6 +320,7 @@
     });
 
     socket.on('roundResult', ({ song, activePlayerId, activeNickname, activeCorrect, stealResults, tokenEligible, winners }) => {
+      roundActive = false;
       let text = `${song.name} (${song.artists}), ${song.year} - `;
 
       if (activeCorrect) {
@@ -329,7 +337,7 @@
         document.getElementById('playRandomSongBtn').hidden = true;
         document.getElementById('startNewGameBtn').hidden = false;
       } else {
-        document.getElementById('playRandomSongBtn').disabled = remainingSongs <= 0;
+        updatePlayButtonVisibility();
       }
 
       document.getElementById('revealResult').textContent = text;
@@ -372,6 +380,7 @@
     // Server confirms the reset to everyone in the room (host included).
     socket.on('newGameStarted', ({ remaining }) => {
       remainingSongs = remaining;
+      roundActive = false;
       document.getElementById('startNewGameBtn').hidden = true;
       document.getElementById('revealBtn').hidden = true;
       document.getElementById('pauseBtn').hidden = true;
@@ -419,9 +428,16 @@
         if (response && response.winLength) {
           document.getElementById('winLengthSelect').value = response.winLength;
         }
+        // The song pool itself was never touched by the refresh - only this
+        // page's local "have I loaded a playlist" flag was lost. Restoring
+        // it is what brings "Play Random Song" back without re-pasting the
+        // playlist link (which would just be a harmless no-op anyway, since
+        // loadPlaylist skips URIs already in the pool).
+        if (response && typeof response.playlistLoaded === 'boolean') {
+          playlistLoaded = response.playlistLoaded;
+        }
         if (response && typeof response.remaining === 'number') {
           remainingSongs = response.remaining;
-          updatePlayButtonVisibility();
         }
 
         // Restore round status text and the Reveal button so a mid-round
@@ -429,6 +445,9 @@
         // these only update on the next live broadcast, which may never
         // come if the round was already fully decided before the reload.
         const round = response && response.round;
+        roundActive = !!round && (round.phase === 'primary' || round.phase === 'steal');
+        updatePlayButtonVisibility();
+
         if (round && round.phase === 'primary') {
           document.getElementById('turnStatus').textContent = `${round.activeNickname}'s turn to guess.`;
           document.getElementById('revealBtn').hidden = true;

@@ -177,6 +177,16 @@ label {
   margin-top: 6px;
 }
 
+/* Same "hero value" treatment as the room code, so a setting that's just as
+   important to see at a glance doesn't read as a plain, easy-to-miss form
+   control next to it. */
+#winLengthSelect {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--accent);
+  padding: 8px 18px;
+}
+
 /* Player list */
 #playerList {
   list-style: none;
@@ -235,6 +245,17 @@ label {
   border-radius: var(--radius-sm);
   padding: 10px 14px;
   font-size: 0.95rem;
+}
+
+.year-chip {
+  display: inline-block;
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.8rem;
+  padding: 2px 9px;
+  border-radius: 999px;
+  margin-right: 8px;
+  font-variant-numeric: tabular-nums;
 }
 
 #timelineList:empty::after {

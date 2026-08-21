@@ -90,12 +90,38 @@
       document.getElementById('tokenCount').textContent = tokens;
     }
 
+    // Maps a song's year onto a single sweep of the rainbow (oldest = red,
+    // newest = violet) instead of a fixed lookup table, so it never needs
+    // updating as new music gets added in future years - maxYear is just
+    // "today", recomputed on every call. The floor is a generous guess at
+    // "older than this basically never comes up" rather than a real data
+    // minimum - being off by a few decades there only nudges the color of a
+    // handful of very old songs, it doesn't break anything.
+    function yearToColor(year) {
+      const MIN_YEAR = 1900;
+      const maxYear = new Date().getFullYear();
+      const t = Math.max(0, Math.min(1, (Number(year) - MIN_YEAR) / (maxYear - MIN_YEAR)));
+      const hue = t * 270;
+      // Saturation/lightness stay fixed so only the hue changes - keeps
+      // white chip text readable at every point on the scale.
+      return `hsl(${hue.toFixed(0)}, 70%, 42%)`;
+    }
+
     function renderTimeline() {
       const list = document.getElementById('timelineList');
       list.innerHTML = '';
       timeline.forEach((song) => {
         const li = document.createElement('li');
-        li.textContent = `${song.year} - ${song.name} (${song.artists})`;
+        const color = yearToColor(song.year);
+        li.style.borderLeftColor = color;
+
+        const chip = document.createElement('span');
+        chip.className = 'year-chip';
+        chip.style.backgroundColor = color;
+        chip.textContent = song.year;
+
+        li.appendChild(chip);
+        li.appendChild(document.createTextNode(` ${song.name} (${song.artists})`));
         list.appendChild(li);
       });
     }
@@ -321,10 +347,10 @@
     });
 
     // Server resets everyone's view when the host starts a new game.
-    socket.on('newGameStarted', () => {
+    socket.on('newGameStarted', ({ startingTokens }) => {
       timeline = [];
       hasGuessed = false;
-      setTokens(0);
+      setTokens(startingTokens || 0);
       renderTimeline();
       hideAllRoundSections();
       document.getElementById('waitingSection').hidden = false;

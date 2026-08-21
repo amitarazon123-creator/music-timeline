@@ -376,6 +376,7 @@ function dealStarterSongs(room) {
 }
 
 const DEFAULT_WIN_LENGTH = 10;
+const STARTING_TOKENS = 1;
 const ALLOWED_WIN_LENGTHS = [3, 5, 8, 10];
 
 // How long a disconnected player has to reconnect before their turn/steal
@@ -561,6 +562,12 @@ io.on('connection', (socket) => {
       players: getPlayerList(room),
       winLength: room.game.winLength,
       remaining: getUnplayedCount(room),
+      // The songPool itself lives on the server and survives a host refresh
+      // untouched - but the browser's local playlistLoaded flag doesn't,
+      // which used to make a freshly reloaded host page look like the
+      // playlist had vanished (hiding "Play Random Song") even though
+      // nothing server-side had actually changed.
+      playlistLoaded: room.songPool.length > 0,
       round: buildHostRoundSnapshot(room),
     });
   });
@@ -737,7 +744,7 @@ io.on('connection', (socket) => {
     room.players.set(playerId, trimmedNickname);
     room.playerSockets.set(playerId, socket.id);
     room.game.timelines.set(playerId, []);
-    room.game.tokens.set(playerId, 0);
+    room.game.tokens.set(playerId, STARTING_TOKENS);
     if (!room.game.turnOrder.includes(playerId)) {
       room.game.turnOrder.push(playerId);
     }
@@ -750,7 +757,7 @@ io.on('connection', (socket) => {
     socket.data.playerId = playerId;
 
     io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
-    callback({ success: true, code: roomCode, playerId, timeline: [], tokens: 0 });
+    callback({ success: true, code: roomCode, playerId, timeline: [], tokens: STARTING_TOKENS });
   });
 
   // Reconnects an existing player identity to a new socket (e.g. after a page
@@ -1085,13 +1092,13 @@ io.on('connection', (socket) => {
     const freshTokens = new Map();
     for (const playerId of room.players.keys()) {
       freshTimelines.set(playerId, []);
-      freshTokens.set(playerId, 0);
+      freshTokens.set(playerId, STARTING_TOKENS);
     }
     room.game.timelines = freshTimelines;
     room.game.tokens = freshTokens;
 
     io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
-    io.to(roomCode).emit('newGameStarted', { remaining: getUnplayedCount(room) });
+    io.to(roomCode).emit('newGameStarted', { remaining: getUnplayedCount(room), startingTokens: STARTING_TOKENS });
     callback({ success: true });
   });
 
