@@ -419,6 +419,26 @@
         if (response && response.winLength) {
           document.getElementById('winLengthSelect').value = response.winLength;
         }
+        if (response && typeof response.remaining === 'number') {
+          remainingSongs = response.remaining;
+          updatePlayButtonVisibility();
+        }
+
+        // Restore round status text and the Reveal button so a mid-round
+        // refresh doesn't strand the host without a way forward - otherwise
+        // these only update on the next live broadcast, which may never
+        // come if the round was already fully decided before the reload.
+        const round = response && response.round;
+        if (round && round.phase === 'primary') {
+          document.getElementById('turnStatus').textContent = `${round.activeNickname}'s turn to guess.`;
+          document.getElementById('revealBtn').hidden = true;
+        } else if (round && round.phase === 'steal') {
+          document.getElementById('turnStatus').textContent = `${round.activeNickname} locked in their bet. Waiting on steal decisions...`;
+          document.getElementById('guessProgress').textContent = round.total === 0
+            ? 'No one else can steal this round.'
+            : `${round.decided}/${round.total} players have decided`;
+          document.getElementById('revealBtn').hidden = !round.complete;
+        }
       });
     }
 

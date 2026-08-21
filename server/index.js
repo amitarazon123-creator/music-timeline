@@ -82,6 +82,27 @@ function buildRoundSnapshot(room, playerId) {
   };
 }
 
+// Same idea as buildRoundSnapshot, but for the host's omniscient view - sent
+// back on hostRejoin so a host who refreshes mid-round doesn't strand
+// themselves without the Reveal button (which otherwise only reappears on
+// the next live 'stealProgress' broadcast, which may never come if every
+// decision was already in before they reloaded).
+function buildHostRoundSnapshot(room) {
+  if (!room.game.currentSong || room.game.phase === 'waiting') {
+    return { phase: 'waiting' };
+  }
+
+  const activeNickname = room.players.get(room.game.activePlayerId) || 'Unknown';
+
+  if (room.game.phase === 'primary') {
+    return { phase: 'primary', activeNickname };
+  }
+
+  const total = room.game.stealDecisionTotal;
+  const decided = total - room.game.pendingDecisions.size;
+  return { phase: 'steal', activeNickname, decided, total, complete: room.game.pendingDecisions.size === 0 };
+}
+
 // Opens the steal window right after the active player locks in their bet -
 // everyone else gets one shot to decide (steal or pass) before anything is
 // revealed. Also used as a safety valve if the active player disconnects
@@ -123,6 +144,12 @@ function emitStealProgress(room, roomCode) {
 // abandoning it outright (e.g. joining a different room), as opposed to a
 // disconnect, which keeps the player's spot around for rejoinRoom.
 function removePlayer(room, roomCode, playerId) {
+  const pendingTimer = room.disconnectTimers.get(playerId);
+  if (pendingTimer) {
+    clearTimeout(pendingTimer);
+    room.disconnectTimers.delete(playerId);
+  }
+
   room.players.delete(playerId);
   room.playerSockets.delete(playerId);
   room.game.timelines.delete(playerId);
@@ -351,6 +378,12 @@ function dealStarterSongs(room) {
 const DEFAULT_WIN_LENGTH = 10;
 const ALLOWED_WIN_LENGTHS = [3, 5, 8, 10];
 
+// How long a disconnected player has to reconnect before their turn/steal
+// decision auto-resolves as a miss/pass - long enough to survive a page
+// refresh or a brief wifi drop, short enough that a genuinely gone player
+// doesn't stall the round indefinitely.
+const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS) || 15000;
+
 const SPOTIFY_SCOPES = [
   'streaming',
   'user-read-email',
@@ -446,6 +479,9 @@ io.on('connection', (socket) => {
       // still present in `players`) has disconnected but kept their spot -
       // their timeline/tokens/turn order all stay put until they rejoin.
       playerSockets: new Map(),
+      // playerId -> pending auto-forfeit/auto-pass timeout from a disconnect,
+      // cancelled by rejoinRoom if they reconnect within the grace period.
+      disconnectTimers: new Map(),
       spotify: null,
       songPool: [],
       hostId: socket.id,
@@ -521,7 +557,12 @@ io.on('connection', (socket) => {
     socket.data.roomCode = roomCode;
     room.hostId = socket.id;
 
-    callback({ players: getPlayerList(room), winLength: room.game.winLength });
+    callback({
+      players: getPlayerList(room),
+      winLength: room.game.winLength,
+      remaining: getUnplayedCount(room),
+      round: buildHostRoundSnapshot(room),
+    });
   });
 
   socket.on('loadPlaylist', async ({ roomCode, playlistUrl }, callback) => {
@@ -726,6 +767,12 @@ io.on('connection', (socket) => {
     if (!room.players.has(playerId)) {
       callback({ error: 'Player not found in this room.' });
       return;
+    }
+
+    const pendingTimer = room.disconnectTimers.get(playerId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      room.disconnectTimers.delete(playerId);
     }
 
     room.playerSockets.set(playerId, socket.id);
@@ -1062,19 +1109,31 @@ io.on('connection', (socket) => {
     // where they left off with rejoinRoom.
     if (room && playerId && room.playerSockets.get(playerId) === socket.id) {
       room.playerSockets.delete(playerId);
-
-      // Don't let a vanished player permanently block the steal window.
-      if (room.game.phase === 'steal' && room.game.pendingDecisions.delete(playerId)) {
-        emitStealProgress(room, roomCode);
-      }
-
-      // Or, if they were mid-turn and never placed their bet, open the steal
-      // window anyway (as an auto-miss) so the round isn't stuck forever.
-      if (room.game.phase === 'primary' && room.game.activePlayerId === playerId) {
-        openStealWindow(room, roomCode);
-      }
-
       io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
+
+      // Don't auto-forfeit the instant someone drops - a page refresh looks
+      // identical to a dead connection at this point, and firing immediately
+      // would silently skip their turn/steal decision before rejoinRoom even
+      // gets a chance to run. Give them a grace period to reconnect first;
+      // rejoinRoom cancels this if they make it back in time.
+      const timer = setTimeout(() => {
+        room.disconnectTimers.delete(playerId);
+
+        if (room.playerSockets.has(playerId)) return; // reconnected in time
+
+        // Don't let a vanished player permanently block the steal window.
+        if (room.game.phase === 'steal' && room.game.pendingDecisions.delete(playerId)) {
+          emitStealProgress(room, roomCode);
+        }
+
+        // Or, if they were mid-turn and never placed their bet, open the
+        // steal window anyway (as an auto-miss) so the round isn't stuck.
+        if (room.game.phase === 'primary' && room.game.activePlayerId === playerId) {
+          openStealWindow(room, roomCode);
+        }
+      }, RECONNECT_GRACE_MS);
+
+      room.disconnectTimers.set(playerId, timer);
     }
   });
 });
