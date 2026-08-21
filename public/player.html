@@ -54,10 +54,32 @@
   <script>
     const socket = io();
     let roomCode = null;
+    let playerId = null;
     let timeline = [];
     let hasGuessed = false;
     let myNickname = null;
     let tokens = 0;
+
+    // Persisted so a page reload or dropped connection can rejoin as the same
+    // player (same timeline/tokens/turn order) instead of starting over.
+    function saveSession(rCode, pId) {
+      localStorage.setItem('mt_roomCode', rCode);
+      localStorage.setItem('mt_playerId', pId);
+    }
+
+    function clearSession() {
+      localStorage.removeItem('mt_roomCode');
+      localStorage.removeItem('mt_playerId');
+    }
+
+    function enterGame(nickname, restoredTimeline, restoredTokens) {
+      myNickname = nickname;
+      timeline = restoredTimeline || [];
+      setTokens(restoredTokens || 0);
+      renderTimeline();
+      document.getElementById('gameSection').hidden = false;
+      document.getElementById('joinForm').hidden = true;
+    }
 
     socket.on('connect', () => {
       console.log('connected');
@@ -132,19 +154,16 @@
         } else {
           status.textContent = `Joined room ${response.code} as ${nickname}`;
           roomCode = response.code;
-          myNickname = nickname;
-          timeline = response.timeline || [];
-          setTokens(response.tokens || 0);
-          renderTimeline();
-          document.getElementById('gameSection').hidden = false;
-          document.getElementById('joinForm').hidden = true;
+          playerId = response.playerId;
+          enterGame(nickname, response.timeline, response.tokens);
+          saveSession(roomCode, playerId);
         }
       });
     });
 
     // A fresh game deals everyone one free starter card before round 1 begins.
     socket.on('starterCardsDealt', ({ dealt }) => {
-      const mine = dealt.find((d) => d.playerId === socket.id);
+      const mine = dealt.find((d) => d.playerId === playerId);
       if (!mine) return;
 
       timeline = [mine.song];
@@ -163,7 +182,7 @@
       hasGuessed = false;
       hideAllRoundSections();
 
-      if (activePlayerId === socket.id) {
+      if (activePlayerId === playerId) {
         renderGapOptions(document.getElementById('positionSelect'), timeline);
         document.getElementById('guessPrompt').textContent = 'Your turn! Where does it belong on your timeline?';
         document.getElementById('guessSection').hidden = false;
@@ -197,7 +216,7 @@
     socket.on('stealWindowOpened', ({ activePlayerId, activeNickname, activeTimeline, stealOptions }) => {
       hideAllRoundSections();
 
-      if (activePlayerId === socket.id) {
+      if (activePlayerId === playerId) {
         document.getElementById('waitingSection').hidden = false;
         document.getElementById('waitingSection').querySelector('p').textContent = 'Bet locked in - waiting for reveal...';
         return;
@@ -256,14 +275,14 @@
     socket.on('roundResult', ({ song, activePlayerId, activeNickname, activeCorrect, activeTimeline, stealResults, winners }) => {
       hideAllRoundSections();
 
-      if (socket.id === activePlayerId) {
+      if (playerId === activePlayerId) {
         timeline = activeTimeline;
         renderTimeline();
         document.getElementById('resultText').textContent = activeCorrect
           ? `Correct! ${song.name} (${song.artists}) - ${song.year}`
           : `You missed it. ${song.name} (${song.artists}) was actually from ${song.year}.`;
       } else {
-        const mine = stealResults.find((result) => result.playerId === socket.id);
+        const mine = stealResults.find((result) => result.playerId === playerId);
 
         if (mine) {
           timeline = mine.timeline;
@@ -311,6 +330,84 @@
       document.getElementById('waitingSection').hidden = false;
       document.getElementById('waitingSection').querySelector('p').textContent = 'New game started - waiting for the next song...';
     });
+
+    // Renders whichever section a round snapshot says this player should see
+    // right now - used right after rejoining, since the live events that
+    // normally drive this (roundStarted/stealWindowOpened) only fire for
+    // sockets that were already connected when they happened.
+    function applySnapshot(snapshot) {
+      hideAllRoundSections();
+
+      if (!snapshot || snapshot.phase === 'waiting') {
+        document.getElementById('waitingSection').hidden = false;
+        document.getElementById('waitingSection').querySelector('p').textContent = 'Waiting for the next song...';
+        return;
+      }
+
+      if (snapshot.phase === 'primary') {
+        if (snapshot.isActive) {
+          hasGuessed = false;
+          renderGapOptions(document.getElementById('positionSelect'), timeline);
+          document.getElementById('guessPrompt').textContent = 'Your turn! Where does it belong on your timeline?';
+          document.getElementById('guessSection').hidden = false;
+        } else {
+          document.getElementById('waitingSection').hidden = false;
+          document.getElementById('waitingSection').querySelector('p').textContent =
+            `${snapshot.activeNickname}'s turn - waiting for their bet...`;
+        }
+        return;
+      }
+
+      // phase === 'steal'
+      if (snapshot.isActive) {
+        document.getElementById('waitingSection').hidden = false;
+        document.getElementById('waitingSection').querySelector('p').textContent = 'Bet locked in - waiting for reveal...';
+        return;
+      }
+
+      if (snapshot.alreadyDecided || snapshot.stealOptions.length === 0) {
+        document.getElementById('waitingSection').hidden = false;
+        document.getElementById('waitingSection').querySelector('p').textContent = 'Waiting for reveal...';
+        return;
+      }
+
+      document.getElementById('stealPrompt').textContent =
+        `${snapshot.activeNickname} placed their bet. Steal one of the remaining spots on their timeline (costs 1 token) or let it ride.`;
+
+      const select = document.getElementById('stealPositionSelect');
+      select.innerHTML = '';
+      snapshot.stealOptions.forEach(({ index, label }) => {
+        const option = document.createElement('option');
+        option.value = index;
+        option.textContent = label;
+        select.appendChild(option);
+      });
+
+      document.getElementById('submitStealBtn').disabled = tokens <= 0;
+      document.getElementById('stealSection').hidden = false;
+    }
+
+    // On load, try to silently resume the last room/identity this browser
+    // joined instead of showing the join form - covers both a plain page
+    // refresh and a dropped connection reconnecting on its own.
+    (function attemptRejoin() {
+      const storedRoomCode = localStorage.getItem('mt_roomCode');
+      const storedPlayerId = localStorage.getItem('mt_playerId');
+      if (!storedRoomCode || !storedPlayerId) return;
+
+      socket.emit('rejoinRoom', { roomCode: storedRoomCode, playerId: storedPlayerId }, (response) => {
+        if (!response || response.error) {
+          clearSession();
+          return;
+        }
+
+        roomCode = response.code;
+        playerId = response.playerId;
+        enterGame(response.nickname, response.timeline, response.tokens);
+        document.getElementById('status').textContent = `Reconnected to room ${roomCode} as ${response.nickname}`;
+        applySnapshot(response);
+      });
+    })();
   </script>
 </body>
 </html>

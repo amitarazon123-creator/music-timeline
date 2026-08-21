@@ -4,6 +4,7 @@ require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const path = require('path');
+const crypto = require('crypto');
 const { Server } = require('socket.io');
 const axios = require('axios');
 
@@ -37,7 +38,48 @@ function getPlayerList(room) {
     id,
     nickname,
     tokens: room.game.tokens.get(id) || 0,
+    connected: room.playerSockets.has(id),
   }));
+}
+
+// Snapshot of the live round (if any) from one player's point of view, sent
+// back on rejoin so their screen can jump straight to the right section
+// instead of waiting for the next broadcast. Mirrors the payloads of
+// 'roundStarted' / 'stealWindowOpened' since those are the events a
+// still-connected player would already have seen.
+function buildRoundSnapshot(room, playerId) {
+  if (!room.game.currentSong || room.game.phase === 'waiting') {
+    return { phase: 'waiting' };
+  }
+
+  const activePlayerId = room.game.activePlayerId;
+  const activeNickname = room.players.get(activePlayerId) || 'Unknown';
+  const isActive = playerId === activePlayerId;
+
+  if (room.game.phase === 'primary') {
+    return { phase: 'primary', activePlayerId, activeNickname, isActive };
+  }
+
+  // phase === 'steal'
+  if (isActive) {
+    return { phase: 'steal', activePlayerId, activeNickname, isActive };
+  }
+
+  const activeTimeline = room.game.timelines.get(activePlayerId) || [];
+  const activeGuess = room.game.guesses.has(activePlayerId) ? room.game.guesses.get(activePlayerId) : null;
+  const stealOptions = computeStealOptions(activeTimeline, activeGuess);
+  const alreadyDecided = !room.game.pendingDecisions.has(playerId);
+
+  return {
+    phase: 'steal',
+    activePlayerId,
+    activeNickname,
+    isActive,
+    activeTimeline,
+    stealOptions,
+    alreadyDecided,
+    tokens: room.game.tokens.get(playerId) || 0,
+  };
 }
 
 // Opens the steal window right after the active player locks in their bet -
@@ -75,6 +117,23 @@ function emitStealProgress(room, roomCode) {
   const total = room.game.stealDecisionTotal;
   const decided = total - room.game.pendingDecisions.size;
   io.to(roomCode).emit('stealProgress', { decided, total, complete: room.game.pendingDecisions.size === 0 });
+}
+
+// Removes a player identity from a room entirely - used when a socket is
+// abandoning it outright (e.g. joining a different room), as opposed to a
+// disconnect, which keeps the player's spot around for rejoinRoom.
+function removePlayer(room, roomCode, playerId) {
+  room.players.delete(playerId);
+  room.playerSockets.delete(playerId);
+  room.game.timelines.delete(playerId);
+  room.game.guesses.delete(playerId);
+  room.game.tokens.delete(playerId);
+  room.game.stealAttempts.delete(playerId);
+  room.game.turnOrder = room.game.turnOrder.filter((id) => id !== playerId);
+  if (room.game.pendingDecisions.delete(playerId)) {
+    emitStealProgress(room, roomCode);
+  }
+  io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
 }
 
 // Builds the Basic auth header Spotify wants for token requests
@@ -383,6 +442,10 @@ io.on('connection', (socket) => {
     const code = generateRoomCode();
     rooms.set(code, {
       players: new Map(),
+      // playerId -> currently-connected socket.id. A player missing here (but
+      // still present in `players`) has disconnected but kept their spot -
+      // their timeline/tokens/turn order all stay put until they rejoin.
+      playerSockets: new Map(),
       spotify: null,
       songPool: [],
       hostId: socket.id,
@@ -615,37 +678,73 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // If this socket already joined a different room, leave it cleanly first -
-    // otherwise it'd stay listed there as a ghost player forever.
+    // If this socket already joined a different room as a player, abandon
+    // that identity first - otherwise it'd stay listed there as a ghost.
     const previousRoomCode = socket.data.roomCode;
-    if (previousRoomCode && previousRoomCode !== roomCode) {
+    const previousPlayerId = socket.data.playerId;
+    if (previousRoomCode && previousPlayerId && previousRoomCode !== roomCode) {
       const previousRoom = rooms.get(previousRoomCode);
-      if (previousRoom && previousRoom.players.has(socket.id)) {
-        previousRoom.players.delete(socket.id);
-        previousRoom.game.timelines.delete(socket.id);
-        previousRoom.game.guesses.delete(socket.id);
-        previousRoom.game.tokens.delete(socket.id);
-        previousRoom.game.stealAttempts.delete(socket.id);
-        previousRoom.game.turnOrder = previousRoom.game.turnOrder.filter((id) => id !== socket.id);
-        if (previousRoom.game.pendingDecisions.delete(socket.id)) {
-          emitStealProgress(previousRoom, previousRoomCode);
-        }
+      if (previousRoom && previousRoom.players.has(previousPlayerId)) {
         socket.leave(previousRoomCode);
-        io.to(previousRoomCode).emit('playerListUpdate', getPlayerList(previousRoom));
+        socket.leave(previousPlayerId);
+        removePlayer(previousRoom, previousRoomCode, previousPlayerId);
       }
     }
 
-    room.players.set(socket.id, trimmedNickname);
-    room.game.timelines.set(socket.id, []);
-    room.game.tokens.set(socket.id, 0);
-    if (!room.game.turnOrder.includes(socket.id)) {
-      room.game.turnOrder.push(socket.id);
+    const playerId = crypto.randomUUID();
+
+    room.players.set(playerId, trimmedNickname);
+    room.playerSockets.set(playerId, socket.id);
+    room.game.timelines.set(playerId, []);
+    room.game.tokens.set(playerId, 0);
+    if (!room.game.turnOrder.includes(playerId)) {
+      room.game.turnOrder.push(playerId);
     }
     socket.join(roomCode);
+    // A private room, just for this player, so the server can target them
+    // directly (e.g. tokensUpdated) without tracking their socket.id - which
+    // changes every time they reconnect.
+    socket.join(playerId);
     socket.data.roomCode = roomCode;
+    socket.data.playerId = playerId;
 
     io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
-    callback({ success: true, code: roomCode, timeline: [], tokens: 0 });
+    callback({ success: true, code: roomCode, playerId, timeline: [], tokens: 0 });
+  });
+
+  // Reconnects an existing player identity to a new socket (e.g. after a page
+  // reload or a dropped connection) instead of starting over - restores their
+  // timeline, tokens, and wherever the current round's phase left off.
+  socket.on('rejoinRoom', ({ roomCode, playerId }, callback) => {
+    const room = rooms.get(roomCode);
+
+    if (!room) {
+      callback({ error: 'Room not found.' });
+      return;
+    }
+
+    if (!room.players.has(playerId)) {
+      callback({ error: 'Player not found in this room.' });
+      return;
+    }
+
+    room.playerSockets.set(playerId, socket.id);
+    socket.join(roomCode);
+    socket.join(playerId);
+    socket.data.roomCode = roomCode;
+    socket.data.playerId = playerId;
+
+    io.to(roomCode).emit('playerListUpdate', getPlayerList(room));
+
+    callback({
+      success: true,
+      code: roomCode,
+      playerId,
+      nickname: room.players.get(playerId),
+      timeline: room.game.timelines.get(playerId) || [],
+      tokens: room.game.tokens.get(playerId) || 0,
+      ...buildRoundSnapshot(room, playerId),
+    });
   });
 
   // The active player locks in where they think the currently-playing song
@@ -660,7 +759,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!room.players.has(socket.id)) {
+    const playerId = socket.data.playerId;
+    if (!playerId || !room.players.has(playerId)) {
       callback({ error: 'Only players can guess.' });
       return;
     }
@@ -670,14 +770,14 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (socket.id !== room.game.activePlayerId) {
+    if (playerId !== room.game.activePlayerId) {
       callback({ error: "It's not your turn." });
       return;
     }
 
-    const timeline = room.game.timelines.get(socket.id) || [];
+    const timeline = room.game.timelines.get(playerId) || [];
     const clamped = Math.max(0, Math.min(Number(position), timeline.length));
-    room.game.guesses.set(socket.id, clamped);
+    room.game.guesses.set(playerId, clamped);
 
     openStealWindow(room, roomCode);
     callback({ success: true });
@@ -695,7 +795,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!room.players.has(socket.id)) {
+    const playerId = socket.data.playerId;
+    if (!playerId || !room.players.has(playerId)) {
       callback({ error: 'Only players can steal.' });
       return;
     }
@@ -705,12 +806,12 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (socket.id === room.game.activePlayerId) {
+    if (playerId === room.game.activePlayerId) {
       callback({ error: "You can't steal on your own turn." });
       return;
     }
 
-    if (!room.game.pendingDecisions.has(socket.id)) {
+    if (!room.game.pendingDecisions.has(playerId)) {
       callback({ error: 'You already decided this round.' });
       return;
     }
@@ -721,15 +822,15 @@ io.on('connection', (socket) => {
       return;
     }
 
-    const tokens = room.game.tokens.get(socket.id) || 0;
+    const tokens = room.game.tokens.get(playerId) || 0;
     if (tokens <= 0) {
       callback({ error: "You don't have a steal token." });
       return;
     }
 
-    room.game.tokens.set(socket.id, tokens - 1);
-    room.game.stealAttempts.set(socket.id, chosen);
-    room.game.pendingDecisions.delete(socket.id);
+    room.game.tokens.set(playerId, tokens - 1);
+    room.game.stealAttempts.set(playerId, chosen);
+    room.game.pendingDecisions.delete(playerId);
 
     callback({ success: true, tokens: tokens - 1 });
     emitStealProgress(room, roomCode);
@@ -744,7 +845,8 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (!room.players.has(socket.id)) {
+    const playerId = socket.data.playerId;
+    if (!playerId || !room.players.has(playerId)) {
       callback({ error: 'Only players can decide this.' });
       return;
     }
@@ -754,17 +856,17 @@ io.on('connection', (socket) => {
       return;
     }
 
-    if (socket.id === room.game.activePlayerId) {
+    if (playerId === room.game.activePlayerId) {
       callback({ error: "You can't steal on your own turn." });
       return;
     }
 
-    if (!room.game.pendingDecisions.has(socket.id)) {
+    if (!room.game.pendingDecisions.has(playerId)) {
       callback({ error: 'You already decided this round.' });
       return;
     }
 
-    room.game.pendingDecisions.delete(socket.id);
+    room.game.pendingDecisions.delete(playerId);
     callback({ success: true });
     emitStealProgress(room, roomCode);
   });
@@ -950,20 +1052,25 @@ io.on('connection', (socket) => {
     console.log(`Client disconnected: ${socket.id}`);
 
     const roomCode = socket.data.roomCode;
+    const playerId = socket.data.playerId;
     const room = roomCode && rooms.get(roomCode);
 
-    if (room && room.players.has(socket.id)) {
-      room.players.delete(socket.id);
-      room.game.turnOrder = room.game.turnOrder.filter((id) => id !== socket.id);
+    // A rejoin may have already handed this playerId off to a newer socket
+    // before this (older) socket's disconnect event arrived - don't let a
+    // stale event knock a reconnected player back offline. Their spot
+    // (timeline/tokens/turn order) stays put either way, so they can pick up
+    // where they left off with rejoinRoom.
+    if (room && playerId && room.playerSockets.get(playerId) === socket.id) {
+      room.playerSockets.delete(playerId);
 
       // Don't let a vanished player permanently block the steal window.
-      if (room.game.phase === 'steal' && room.game.pendingDecisions.delete(socket.id)) {
+      if (room.game.phase === 'steal' && room.game.pendingDecisions.delete(playerId)) {
         emitStealProgress(room, roomCode);
       }
 
       // Or, if they were mid-turn and never placed their bet, open the steal
       // window anyway (as an auto-miss) so the round isn't stuck forever.
-      if (room.game.phase === 'primary' && room.game.activePlayerId === socket.id) {
+      if (room.game.phase === 'primary' && room.game.activePlayerId === playerId) {
         openStealWindow(room, roomCode);
       }
 
