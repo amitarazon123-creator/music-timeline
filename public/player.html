@@ -46,6 +46,8 @@
       <div id="resultSection" hidden class="card">
         <p id="resultText"></p>
       </div>
+
+      <button id="leaveRoomBtn" class="secondary">Leave Room</button>
     </div>
   </div>
 
@@ -71,6 +73,16 @@
       localStorage.removeItem('mt_roomCode');
       localStorage.removeItem('mt_playerId');
     }
+
+    // Without this, a player whose host started a fresh room elsewhere had no
+    // way back to the join form at all - the saved room still technically
+    // exists (rooms are never deleted), so the auto-rejoin below would just
+    // keep silently placing them back into it, host-less, forever. A plain
+    // reload after clearing is the simplest way back to a clean join screen.
+    document.getElementById('leaveRoomBtn').addEventListener('click', () => {
+      clearSession();
+      location.reload();
+    });
 
     function enterGame(nickname, restoredTimeline, restoredTokens) {
       myNickname = nickname;

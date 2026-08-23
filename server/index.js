@@ -472,8 +472,25 @@ app.get('/token', async (req, res) => {
 io.on('connection', (socket) => {
   console.log(`Client connected: ${socket.id}`);
 
+  // Every handler below assumes its last argument is a callable ack
+  // callback, since that's all the shipped client ever sends. But a client
+  // that emits without one (a malformed message, a rogue script) would
+  // otherwise hit `callback(...)` on undefined - an uncaught TypeError that
+  // crashes this single Node process, wiping every room's in-memory game
+  // state at once. Wrapping registration here guarantees a safe no-op
+  // callback instead, without touching any individual handler below.
+  const onWithSafeCallback = socket.on.bind(socket);
+  socket.on = (event, handler) => onWithSafeCallback(event, (...args) => {
+    if (typeof args[args.length - 1] !== 'function') args.push(() => {});
+    return handler(...args);
+  });
+
   socket.on('createRoom', (callback) => {
     const code = generateRoomCode();
+    // Secret only the actual host's browser ever sees (returned once, below,
+    // and never broadcast) - hostRejoin requires it so that merely knowing
+    // or opening the room's URL isn't enough to silently take over hosting.
+    const hostToken = crypto.randomUUID();
     rooms.set(code, {
       players: new Map(),
       // playerId -> currently-connected socket.id. A player missing here (but
@@ -486,6 +503,7 @@ io.on('connection', (socket) => {
       spotify: null,
       songPool: [],
       hostId: socket.id,
+      hostToken,
       game: {
         currentSong: null,
         timelines: new Map(),
@@ -514,7 +532,7 @@ io.on('connection', (socket) => {
     socket.join(code);
     socket.data.roomCode = code;
 
-    callback({ code });
+    callback({ code, hostToken });
   });
 
   // Host-only: how many songs a player needs on their timeline to win. Kept
@@ -543,14 +561,24 @@ io.on('connection', (socket) => {
     callback({ success: true });
   });
 
-  // The host's page fully reloads after the Spotify redirect, which means a brand-new
-  // socket connection. This puts that new socket back into the room's Socket.io channel
-  // so the host keeps receiving live playerListUpdate broadcasts.
-  socket.on('hostRejoin', (roomCode, callback) => {
+  // Any full page load on the host side (the Spotify redirect, or just a plain
+  // refresh) means a brand-new socket connection. This puts that new socket back
+  // into the room's Socket.io channel so the host keeps receiving live
+  // playerListUpdate broadcasts.
+  socket.on('hostRejoin', ({ roomCode, hostToken }, callback) => {
     const room = rooms.get(roomCode);
 
     if (!room) {
       callback({ error: 'Room not found.' });
+      return;
+    }
+
+    // Without this check, any browser that merely opens a URL containing
+    // this room's code (e.g. a copied/duplicated tab) would silently become
+    // the new host and lock out whoever actually created the room - the
+    // token is the one piece only the real host's browser was ever given.
+    if (!hostToken || hostToken !== room.hostToken) {
+      callback({ error: 'Not authorized to host this room.' });
       return;
     }
 
@@ -568,6 +596,11 @@ io.on('connection', (socket) => {
       // playlist had vanished (hiding "Play Random Song") even though
       // nothing server-side had actually changed.
       playlistLoaded: room.songPool.length > 0,
+      // Same idea as playlistLoaded - a plain refresh (not just the
+      // Spotify-redirect one) now also restores this room, so the client
+      // needs an authoritative answer instead of only trusting the one-time
+      // ?spotify=connected URL param from the login redirect.
+      spotifyConnected: !!room.spotify,
       round: buildHostRoundSnapshot(room),
     });
   });

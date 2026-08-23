@@ -171,6 +171,14 @@
     document.getElementById('createRoomBtn').addEventListener('click', () => {
       socket.emit('createRoom', (response) => {
         roomCode = response.code;
+        // Persisted so ANY future full page load - the Spotify redirect, or
+        // just a plain refresh - can resume this same room instead of
+        // silently landing on a blank "Create Room" screen while players
+        // stay stuck pointing at a now-hostless room. hostToken is what
+        // proves to the server this browser is the one that created it,
+        // rather than any tab that merely opens its URL.
+        localStorage.setItem('mt_hostToken', response.hostToken);
+        localStorage.setItem('mt_hostRoomCode', response.code);
         showRoom();
       });
     });
@@ -415,13 +423,40 @@
     const spotifyResult = params.get('spotify');
     const paramRoom = params.get('room');
 
-    if (paramRoom) {
-      roomCode = paramRoom;
+    // A plain refresh carries none of those URL params at all - fall back to
+    // whatever room this browser last created, so refreshing doesn't silently
+    // orphan it (players would otherwise stay pointed at a room with no host
+    // left, and never learn a new one exists). paramRoom wins when present
+    // since it reflects the room this exact page load's redirect was for.
+    const restoreRoomCode = paramRoom || localStorage.getItem('mt_hostRoomCode');
+
+    function clearHostSession() {
+      localStorage.removeItem('mt_hostToken');
+      localStorage.removeItem('mt_hostRoomCode');
+    }
+
+    if (restoreRoomCode) {
+      roomCode = restoreRoomCode;
       showRoom();
 
-      // The page just fully reloaded, so this is a new socket connection - rejoin the
-      // room's channel so we keep getting live player list updates.
-      socket.emit('hostRejoin', roomCode, (response) => {
+      // The page just (re)loaded, so this is a new socket connection - rejoin the
+      // room's channel so we keep getting live player list updates. hostToken proves
+      // this browser is the one that actually created the room (see createRoomBtn).
+      const hostToken = localStorage.getItem('mt_hostToken');
+      socket.emit('hostRejoin', { roomCode, hostToken }, (response) => {
+        if (response && response.error) {
+          // Either this room is gone, or some other tab/browser has since
+          // claimed host for it (or the token is stale/missing) - don't leave
+          // a half-functional "connected" UI up. Forgetting it here means the
+          // next refresh lands cleanly on "Create Room" instead of retrying
+          // this same dead room forever.
+          clearHostSession();
+          document.getElementById('roomSection').hidden = true;
+          document.getElementById('spotifyConnectedSection').hidden = true;
+          document.getElementById('createRoomBtn').hidden = false;
+          alert(`Couldn't reconnect as host: ${response.error}`);
+          return;
+        }
         if (response && response.players) {
           renderPlayerList(response.players);
         }
@@ -438,6 +473,17 @@
         }
         if (response && typeof response.remaining === 'number') {
           remainingSongs = response.remaining;
+        }
+
+        // Authoritative from the server, so a plain refresh (no ?spotify=
+        // param in the URL) still shows the right section instead of
+        // defaulting back to "Login with Spotify" even though this room
+        // already had it connected.
+        if (response && response.spotifyConnected) {
+          document.getElementById('spotifyLoginSection').hidden = true;
+          document.getElementById('spotifyConnectedSection').hidden = false;
+          spotifyConnected = true;
+          tryInitPlayer();
         }
 
         // Restore round status text and the Reveal button so a mid-round
