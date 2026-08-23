@@ -113,14 +113,18 @@ button.gap-option {
   font-weight: 500;
 }
 
-/* :hover repeated here so it beats button.secondary:hover's higher
-   specificity - otherwise a selected button's highlight would flicker back
-   to the plain hover color while the pointer sits on it. */
+/* Amber/gold, not the app's green - green is reserved for the confirm
+   action (Lock In Guess / Steal) everywhere else in the app, so a picked
+   option needs its own color or the two easily get mistaken for each other.
+   Reuses --warn, the same gold already used for the steal window's border.
+   :hover repeated here so it beats button.secondary:hover's higher
+   specificity - otherwise the highlight would flicker back to the plain
+   hover color while the pointer sits on it. */
 button.gap-option.selected,
 button.gap-option.selected:hover {
-  background: var(--accent);
+  background: var(--warn);
   color: var(--accent-text);
-  border-color: var(--accent);
+  border-color: var(--warn);
   font-weight: 700;
 }
 

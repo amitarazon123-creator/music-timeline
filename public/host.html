@@ -168,9 +168,50 @@
       document.getElementById('roomSection').hidden = false;
     }
 
+    // A brand-new room starts completely empty server-side, but nothing else
+    // on this page resets on its own - without this, clicking Create Room
+    // again (e.g. after a previous game) leaves the old room's player list,
+    // Spotify connection state, and round text all visibly - and confusingly
+    // - still on screen, looking like the new room already has people in it.
+    function resetHostUiForNewRoom() {
+      playlistLoaded = false;
+      spotifyConnected = false;
+      deviceId = null;
+      remainingSongs = 0;
+      roundActive = false;
+
+      // The old Spotify.Player instance (if any) belongs to the previous
+      // room's login - disconnect and drop it, otherwise tryInitPlayer()
+      // would silently refuse to create a new one after logging in again
+      // (it bails out whenever `player` is already set).
+      if (player) {
+        player.disconnect();
+        player = null;
+      }
+
+      renderPlayerList([]);
+      document.getElementById('winLengthSelect').value = '10';
+      document.getElementById('winLengthStatus').textContent = '';
+      document.getElementById('spotifyLoginSection').hidden = false;
+      document.getElementById('spotifyConnectedSection').hidden = true;
+      document.getElementById('playlistUrlInput').value = '';
+      document.getElementById('playlistStatus').textContent = '';
+      document.getElementById('playRandomSongBtn').hidden = true;
+      document.getElementById('pauseBtn').hidden = true;
+      document.getElementById('revealBtn').hidden = true;
+      document.getElementById('startNewGameBtn').hidden = true;
+      document.getElementById('turnStatus').textContent = '';
+      document.getElementById('playStatus').textContent = '';
+      document.getElementById('guessProgress').textContent = '';
+      document.getElementById('revealResult').textContent = '';
+      document.getElementById('tokenAwardSection').hidden = true;
+      document.getElementById('premiumError').hidden = true;
+    }
+
     document.getElementById('createRoomBtn').addEventListener('click', () => {
       socket.emit('createRoom', (response) => {
         roomCode = response.code;
+        resetHostUiForNewRoom();
         // Persisted so ANY future full page load - the Spotify redirect, or
         // just a plain refresh - can resume this same room instead of
         // silently landing on a blank "Create Room" screen while players
