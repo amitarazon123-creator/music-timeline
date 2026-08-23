@@ -32,23 +32,28 @@
 
       <div id="guessSection" hidden class="card stack">
         <p id="guessPrompt">A song is playing! Where does it belong on your timeline?</p>
-        <select id="positionSelect"></select>
-        <button id="submitGuessBtn">Lock In Guess</button>
+        <div id="positionOptions" class="stack"></div>
+        <button id="submitGuessBtn" disabled>Lock In Guess</button>
       </div>
 
       <div id="stealSection" hidden class="card stack">
         <p id="stealPrompt">Someone else's turn. Want to try to steal it?</p>
-        <select id="stealPositionSelect"></select>
-        <button id="submitStealBtn">Steal (costs 1 token)</button>
+        <div id="stealPositionOptions" class="stack"></div>
+        <button id="submitStealBtn" disabled>Steal (costs 1 token)</button>
         <button id="passStealBtn" class="secondary">Don't Steal</button>
       </div>
 
       <div id="resultSection" hidden class="card">
         <p id="resultText"></p>
       </div>
-
-      <button id="leaveRoomBtn" class="secondary">Leave Room</button>
     </div>
+  </div>
+
+  <!-- Deliberately outside .wrap's card stack and pushed well down the page,
+       away from the guess/steal buttons, so it can't get bumped by accident
+       mid-game - this is a rare, deliberate action, not a frequent one. -->
+  <div class="wrap" style="margin-top: 56px;">
+    <button id="leaveRoomBtn" hidden class="secondary" style="width: auto; padding: 8px 18px; font-size: 0.8rem; opacity: 0.7; margin: 0 auto; display: block;">Leave Room</button>
   </div>
 
   <!-- Socket.io serves this file automatically, no need to install anything client-side -->
@@ -91,6 +96,7 @@
       renderTimeline();
       document.getElementById('gameSection').hidden = false;
       document.getElementById('joinForm').hidden = true;
+      document.getElementById('leaveRoomBtn').hidden = false;
     }
 
     socket.on('connect', () => {
@@ -138,33 +144,73 @@
       });
     }
 
-    // Builds one dropdown option per gap in a timeline (before the first
-    // card, between each pair, and after the last one). Skips the gap between
-    // two cards that share a year - it's always redundant, since whenever
-    // it's a correct guess, both of its neighboring gaps are correct too.
+    // Renders one big tappable button per option (replacing what used to be
+    // a native <select> - a dropdown picker is fiddly on a phone mid-game and
+    // doesn't read well). Only one button can be selected at a time; the
+    // chosen value lives on the container's dataset instead of a form
+    // control's .value, and submitBtn stays disabled until something's
+    // picked. `extraDisableCheck`, if given, is re-checked on every click so
+    // e.g. a steal button can stay disabled without tokens even once a gap
+    // is picked.
+    function buildOptionButtons(containerEl, options, submitBtn, extraDisableCheck) {
+      containerEl.innerHTML = '';
+      containerEl.dataset.selected = '';
+      submitBtn.disabled = true;
+
+      options.forEach(({ value, label }) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'secondary gap-option';
+        btn.textContent = label;
+        btn.addEventListener('click', () => {
+          containerEl.querySelectorAll('.gap-option').forEach((b) => b.classList.remove('selected'));
+          btn.classList.add('selected');
+          containerEl.dataset.selected = value;
+          submitBtn.disabled = extraDisableCheck ? extraDisableCheck() : false;
+        });
+        containerEl.appendChild(btn);
+      });
+    }
+
+    // Builds one button per gap in a timeline (before the first card,
+    // between each pair, and after the last one). Skips the gap between two
+    // cards that share a year - it's always redundant, since whenever it's a
+    // correct guess, both of its neighboring gaps are correct too.
     // `allowedIndices`, if given, further restricts which gaps show up (used
     // for steal attempts, where some of the active player's gaps are off
     // limits).
-    function renderGapOptions(selectEl, refTimeline, allowedIndices) {
-      selectEl.innerHTML = '';
+    function renderGapOptions(containerEl, refTimeline, allowedIndices, submitBtn) {
+      const options = [];
 
       for (let i = 0; i <= refTimeline.length; i++) {
         if (i > 0 && i < refTimeline.length && refTimeline[i - 1].year === refTimeline[i].year) continue;
         if (allowedIndices && !allowedIndices.includes(i)) continue;
 
-        const option = document.createElement('option');
-        option.value = i;
+        let label;
         if (refTimeline.length === 0) {
-          option.textContent = 'Only card';
+          label = 'Only card';
         } else if (i === 0) {
-          option.textContent = `Before ${refTimeline[0].year}`;
+          label = `Before ${refTimeline[0].year}`;
         } else if (i === refTimeline.length) {
-          option.textContent = `After ${refTimeline[refTimeline.length - 1].year}`;
+          label = `After ${refTimeline[refTimeline.length - 1].year}`;
         } else {
-          option.textContent = `Between ${refTimeline[i - 1].year} and ${refTimeline[i].year}`;
+          label = `Between ${refTimeline[i - 1].year} and ${refTimeline[i].year}`;
         }
-        selectEl.appendChild(option);
+        options.push({ value: i, label });
       }
+
+      buildOptionButtons(containerEl, options, submitBtn);
+    }
+
+    // Steal options arrive pre-built (index + label) from the server, since
+    // it already knows which of the active player's gaps are off-limits.
+    function renderStealOptions(containerEl, stealOptions, submitBtn) {
+      buildOptionButtons(
+        containerEl,
+        stealOptions.map(({ index, label }) => ({ value: index, label })),
+        submitBtn,
+        () => tokens <= 0
+      );
     }
 
     function hideAllRoundSections() {
@@ -221,7 +267,7 @@
       hideAllRoundSections();
 
       if (activePlayerId === playerId) {
-        renderGapOptions(document.getElementById('positionSelect'), timeline);
+        renderGapOptions(document.getElementById('positionOptions'), timeline, null, document.getElementById('submitGuessBtn'));
         document.getElementById('guessPrompt').textContent = 'Your turn! Where does it belong on your timeline?';
         document.getElementById('guessSection').hidden = false;
       } else {
@@ -234,7 +280,7 @@
     document.getElementById('submitGuessBtn').addEventListener('click', () => {
       if (hasGuessed) return;
 
-      const position = Number(document.getElementById('positionSelect').value);
+      const position = Number(document.getElementById('positionOptions').dataset.selected);
       socket.emit('submitGuess', { roomCode, position }, (response) => {
         if (response.error) {
           alert(response.error);
@@ -270,21 +316,12 @@
       document.getElementById('stealPrompt').textContent =
         `${activeNickname} placed their bet. Steal one of the remaining spots on their timeline (costs 1 token) or let it ride.`;
 
-      const select = document.getElementById('stealPositionSelect');
-      select.innerHTML = '';
-      stealOptions.forEach(({ index, label }) => {
-        const option = document.createElement('option');
-        option.value = index;
-        option.textContent = label;
-        select.appendChild(option);
-      });
-
-      document.getElementById('submitStealBtn').disabled = tokens <= 0;
+      renderStealOptions(document.getElementById('stealPositionOptions'), stealOptions, document.getElementById('submitStealBtn'));
       document.getElementById('stealSection').hidden = false;
     });
 
     document.getElementById('submitStealBtn').addEventListener('click', () => {
-      const position = Number(document.getElementById('stealPositionSelect').value);
+      const position = Number(document.getElementById('stealPositionOptions').dataset.selected);
 
       socket.emit('submitSteal', { roomCode, position }, (response) => {
         if (response.error) {
@@ -385,7 +422,7 @@
       if (snapshot.phase === 'primary') {
         if (snapshot.isActive) {
           hasGuessed = false;
-          renderGapOptions(document.getElementById('positionSelect'), timeline);
+          renderGapOptions(document.getElementById('positionOptions'), timeline, null, document.getElementById('submitGuessBtn'));
           document.getElementById('guessPrompt').textContent = 'Your turn! Where does it belong on your timeline?';
           document.getElementById('guessSection').hidden = false;
         } else {
@@ -412,16 +449,7 @@
       document.getElementById('stealPrompt').textContent =
         `${snapshot.activeNickname} placed their bet. Steal one of the remaining spots on their timeline (costs 1 token) or let it ride.`;
 
-      const select = document.getElementById('stealPositionSelect');
-      select.innerHTML = '';
-      snapshot.stealOptions.forEach(({ index, label }) => {
-        const option = document.createElement('option');
-        option.value = index;
-        option.textContent = label;
-        select.appendChild(option);
-      });
-
-      document.getElementById('submitStealBtn').disabled = tokens <= 0;
+      renderStealOptions(document.getElementById('stealPositionOptions'), snapshot.stealOptions, document.getElementById('submitStealBtn'));
       document.getElementById('stealSection').hidden = false;
     }
 
