@@ -166,7 +166,11 @@
         method: 'PUT',
         headers: { Authorization: `Bearer ${accessToken}` },
       });
-      if (!res.ok) throw new Error(`Failed to pause (${res.status})`);
+      if (!res.ok) {
+        const error = new Error(`Failed to pause (${res.status})`);
+        error.status = res.status;
+        throw error;
+      }
     }
 
     function updatePlayButtonVisibility() {
@@ -351,19 +355,32 @@
           });
 
           if (!playRes.ok) {
-            throw new Error(`Spotify playback request failed (${playRes.status})`);
+            const error = new Error(`Spotify playback request failed (${playRes.status})`);
+            error.status = playRes.status;
+            throw error;
           }
 
           status.textContent = 'Playing...';
           document.getElementById('pauseBtn').hidden = false;
         } catch (err) {
           console.error('Failed to start playback:', err);
-          // A 403 here is almost always Spotify saying the selected device's
-          // account isn't Premium - the round can still proceed regardless,
-          // since guessing doesn't depend on audio actually playing.
-          status.textContent = err.message && err.message.includes('403')
-            ? 'Failed to start playback - the selected device needs Spotify Premium.'
-            : 'Failed to start Spotify playback - the round can still proceed once bets are in.';
+          // A 404 here means Spotify no longer recognizes the chosen device -
+          // most commonly because it went idle in the background (phones
+          // suspend apps that aren't actively playing audio) and dropped off
+          // Spotify's list of active devices. Refresh right away so the
+          // dropdown reflects reality instead of silently pointing at a
+          // device that's already gone.
+          if (err.status === 404) {
+            status.textContent = 'Lost the selected device - bring Spotify to the foreground for a second, then pick it again below.';
+            refreshDevices();
+          } else if (err.status === 403) {
+            // Almost always Spotify saying the selected device's account isn't
+            // Premium - the round can still proceed regardless, since
+            // guessing doesn't depend on audio actually playing.
+            status.textContent = 'Failed to start playback - the selected device needs Spotify Premium.';
+          } else {
+            status.textContent = 'Failed to start Spotify playback - the round can still proceed once bets are in.';
+          }
         }
       });
     });
@@ -470,7 +487,12 @@
         status.textContent = 'Paused.';
       } catch (err) {
         console.error('Failed to pause playback:', err);
-        status.textContent = 'Failed to pause playback.';
+        if (err.status === 404) {
+          status.textContent = 'Lost the selected device - bring Spotify to the foreground for a second, then pick it again below.';
+          refreshDevices();
+        } else {
+          status.textContent = 'Failed to pause playback.';
+        }
       }
     });
 
