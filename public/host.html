@@ -36,6 +36,14 @@
 
       <div id="spotifyConnectedSection" hidden class="card stack">
         <span class="badge"><span class="dot"></span> Spotify connected</span>
+
+        <div class="row" style="justify-content: space-between;">
+          <label style="flex: none;">Playback device</label>
+          <button id="refreshDevicesBtn" class="secondary" style="flex: none;">Refresh</button>
+        </div>
+        <select id="deviceSelect"></select>
+        <p id="deviceStatus" class="status-text">Open Spotify on the phone/speaker/computer you want music to play through, then click Refresh.</p>
+
         <div class="row">
           <input id="playlistUrlInput" type="text" placeholder="Spotify playlist link" />
           <button id="loadPlaylistBtn" style="flex: none;">Load</button>
@@ -61,8 +69,6 @@
             <button id="skipTokenBtn" class="secondary">No Token</button>
           </div>
         </div>
-
-        <p id="premiumError" hidden class="status-text error">Spotify Premium is required to host a game.</p>
       </div>
 
       <div class="card">
@@ -74,73 +80,93 @@
 
   <!-- Socket.io serves this file automatically, no need to install anything client-side -->
   <script src="/socket.io/socket.io.js"></script>
-  <!-- Lets the browser become a controllable Spotify playback device -->
-  <script src="https://sdk.scdn.co/spotify-player.js"></script>
   <script>
     const socket = io();
     let roomCode = null;
 
-    // Web Playback SDK state
-    let sdkReady = false;
     let spotifyConnected = false;
     let playlistLoaded = false;
+    // Device this host is remote-controlling via Spotify Connect (their
+    // phone's Spotify app, a speaker, a desktop client - anything already
+    // signed into the same account). Playing a browser tab's own audio
+    // (the old Web Playback SDK approach) doesn't work reliably on mobile
+    // browsers, which was the actual cause of "plays" that produced no
+    // sound - remote-controlling a real, already-working Spotify app
+    // sidesteps that entirely and works the same on any device.
     let deviceId = null;
-    let player = null;
     let remainingSongs = 0;
     // Whether a round is currently live (primary or steal phase) - kept as
     // its own flag so updatePlayButtonVisibility can't be tricked into
-    // re-enabling "Play Random Song" by an unrelated event (like the Spotify
-    // SDK's device becoming "ready" mid-round) firing after the round itself
-    // already disabled it.
+    // re-enabling "Play Random Song" by an unrelated event firing after the
+    // round itself already disabled it.
     let roundActive = false;
 
-    // Called by the SDK's own script tag once it's finished loading
-    window.onSpotifyWebPlaybackSDKReady = () => {
-      sdkReady = true;
-      tryInitPlayer();
-    };
+    async function getAccessToken() {
+      const res = await fetch(`/token?room=${roomCode}`);
+      const { accessToken } = await res.json();
+      return accessToken;
+    }
 
-    // Creates the Spotify.Player once we know both the SDK has loaded and the
-    // host has connected their Spotify account (order between the two varies).
-    function tryInitPlayer() {
-      if (!sdkReady || !spotifyConnected || !roomCode || player) return;
+    // Populates the device picker from whatever Spotify Connect devices are
+    // currently active on this account (Spotify open on a phone, a speaker,
+    // a desktop client, etc.) - the host picks which one "Play Random Song"
+    // should actually play through.
+    async function refreshDevices() {
+      const select = document.getElementById('deviceSelect');
+      const status = document.getElementById('deviceStatus');
+      status.textContent = 'Looking for devices...';
 
-      player = new Spotify.Player({
-        name: 'Music Timeline Host',
-        volume: 0.8,
-        // The SDK calls this every time it needs a fresh token; the server
-        // refreshes it under the hood if the stored one has expired.
-        getOAuthToken: (callback) => {
-          fetch(`/token?room=${roomCode}`)
-            .then((res) => res.json())
-            .then((data) => callback(data.accessToken))
-            .catch((err) => console.error('Failed to fetch token:', err));
-        },
+      try {
+        const accessToken = await getAccessToken();
+        const res = await fetch('https://api.spotify.com/v1/me/player/devices', {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!res.ok) throw new Error(`Failed to list devices (${res.status})`);
+        const { devices } = await res.json();
+
+        select.innerHTML = '';
+        if (devices.length === 0) {
+          const option = document.createElement('option');
+          option.value = '';
+          option.textContent = 'No devices found';
+          select.appendChild(option);
+          deviceId = null;
+          status.textContent = 'Open Spotify on the phone/speaker/computer you want music to play through, then click Refresh.';
+        } else {
+          devices.forEach((device) => {
+            const option = document.createElement('option');
+            option.value = device.id;
+            option.textContent = `${device.name} (${device.type})`;
+            select.appendChild(option);
+          });
+          deviceId = select.value;
+          status.textContent = `${devices.length} device${devices.length === 1 ? '' : 's'} found.`;
+        }
+      } catch (err) {
+        console.error('Failed to list devices:', err);
+        status.textContent = 'Failed to look up devices - try again.';
+      }
+
+      updatePlayButtonVisibility();
+    }
+
+    document.getElementById('deviceSelect').addEventListener('change', (event) => {
+      deviceId = event.target.value || null;
+      updatePlayButtonVisibility();
+    });
+
+    document.getElementById('refreshDevicesBtn').addEventListener('click', refreshDevices);
+
+    // Shared by the Pause button and by leaving a finished game - both just
+    // need "stop whatever's playing on the chosen device" via the same Web
+    // API call the Play button already uses.
+    async function pausePlayback() {
+      const accessToken = await getAccessToken();
+      const res = await fetch(`https://api.spotify.com/v1/me/player/pause?device_id=${deviceId}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${accessToken}` },
       });
-
-      player.addListener('ready', ({ device_id }) => {
-        deviceId = device_id;
-        updatePlayButtonVisibility();
-      });
-
-      player.addListener('not_ready', ({ device_id }) => {
-        if (device_id === deviceId) deviceId = null;
-      });
-
-      // Fires when the logged-in account isn't Premium (or otherwise can't stream)
-      player.addListener('account_error', () => {
-        document.getElementById('premiumError').hidden = false;
-      });
-
-      player.addListener('initialization_error', ({ message }) => {
-        console.error('Spotify player initialization error:', message);
-      });
-
-      player.addListener('authentication_error', ({ message }) => {
-        console.error('Spotify player authentication error:', message);
-      });
-
-      player.connect();
+      if (!res.ok) throw new Error(`Failed to pause (${res.status})`);
     }
 
     function updatePlayButtonVisibility() {
@@ -180,20 +206,13 @@
       remainingSongs = 0;
       roundActive = false;
 
-      // The old Spotify.Player instance (if any) belongs to the previous
-      // room's login - disconnect and drop it, otherwise tryInitPlayer()
-      // would silently refuse to create a new one after logging in again
-      // (it bails out whenever `player` is already set).
-      if (player) {
-        player.disconnect();
-        player = null;
-      }
-
       renderPlayerList([]);
       document.getElementById('winLengthSelect').value = '10';
       document.getElementById('winLengthStatus').textContent = '';
       document.getElementById('spotifyLoginSection').hidden = false;
       document.getElementById('spotifyConnectedSection').hidden = true;
+      document.getElementById('deviceSelect').innerHTML = '';
+      document.getElementById('deviceStatus').textContent = 'Open Spotify on the phone/speaker/computer you want music to play through, then click Refresh.';
       document.getElementById('playlistUrlInput').value = '';
       document.getElementById('playlistStatus').textContent = '';
       document.getElementById('playRandomSongBtn').hidden = true;
@@ -205,7 +224,6 @@
       document.getElementById('guessProgress').textContent = '';
       document.getElementById('revealResult').textContent = '';
       document.getElementById('tokenAwardSection').hidden = true;
-      document.getElementById('premiumError').hidden = true;
     }
 
     document.getElementById('createRoomBtn').addEventListener('click', () => {
@@ -321,8 +339,7 @@
         document.getElementById('revealBtn').hidden = true;
 
         try {
-          const tokenRes = await fetch(`/token?room=${roomCode}`);
-          const { accessToken } = await tokenRes.json();
+          const accessToken = await getAccessToken();
 
           const playRes = await fetch(`https://api.spotify.com/v1/me/player/play?device_id=${deviceId}`, {
             method: 'PUT',
@@ -341,7 +358,12 @@
           document.getElementById('pauseBtn').hidden = false;
         } catch (err) {
           console.error('Failed to start playback:', err);
-          status.textContent = 'Failed to start Spotify playback - the round can still proceed once bets are in.';
+          // A 403 here is almost always Spotify saying the selected device's
+          // account isn't Premium - the round can still proceed regardless,
+          // since guessing doesn't depend on audio actually playing.
+          status.textContent = err.message && err.message.includes('403')
+            ? 'Failed to start playback - the selected device needs Spotify Premium.'
+            : 'Failed to start Spotify playback - the round can still proceed once bets are in.';
         }
       });
     });
@@ -415,8 +437,8 @@
       // The winning round's song may still be audibly playing - stop it now,
       // since the pause button is about to disappear along with everything
       // else from the finished game.
-      if (player) {
-        player.pause().catch((err) => console.error('Failed to pause playback:', err));
+      if (deviceId) {
+        pausePlayback().catch((err) => console.error('Failed to pause playback:', err));
       }
 
       socket.emit('startNewGame', { roomCode }, (response) => {
@@ -441,19 +463,15 @@
       updatePlayButtonVisibility();
     });
 
-    document.getElementById('pauseBtn').addEventListener('click', () => {
+    document.getElementById('pauseBtn').addEventListener('click', async () => {
       const status = document.getElementById('playStatus');
-
-      // player.pause() controls this SDK instance directly, no Web API call needed
-      player
-        .pause()
-        .then(() => {
-          status.textContent = 'Paused.';
-        })
-        .catch((err) => {
-          console.error('Failed to pause playback:', err);
-          status.textContent = 'Failed to pause playback.';
-        });
+      try {
+        await pausePlayback();
+        status.textContent = 'Paused.';
+      } catch (err) {
+        console.error('Failed to pause playback:', err);
+        status.textContent = 'Failed to pause playback.';
+      }
     });
 
     // Fired by the server whenever a player joins, leaves, or their token count changes
@@ -532,7 +550,7 @@
           document.getElementById('spotifyLoginSection').hidden = true;
           document.getElementById('spotifyConnectedSection').hidden = false;
           spotifyConnected = true;
-          tryInitPlayer();
+          refreshDevices();
         }
 
         // Restore round status text and the Reveal button so a mid-round
@@ -562,7 +580,7 @@
       document.getElementById('spotifyLoginSection').hidden = true;
       document.getElementById('spotifyConnectedSection').hidden = false;
       spotifyConnected = true;
-      tryInitPlayer();
+      refreshDevices();
     } else if (spotifyResult === 'error') {
       document.getElementById('spotifyStatus').textContent = 'Spotify connection failed. Please try again.';
     }

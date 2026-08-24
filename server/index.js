@@ -385,8 +385,11 @@ const ALLOWED_WIN_LENGTHS = [3, 5, 8, 10];
 // doesn't stall the round indefinitely.
 const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS) || 15000;
 
+// 'streaming' isn't requested here - it was only needed for the Web Playback
+// SDK (turning the host's own browser tab into a playback device), which
+// doesn't work reliably on mobile. Playback is now controlled remotely on
+// whichever real Spotify Connect device the host picks instead.
 const SPOTIFY_SCOPES = [
-  'streaming',
   'user-read-email',
   'user-read-private',
   'user-modify-playback-state',
