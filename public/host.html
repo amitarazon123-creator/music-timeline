@@ -479,10 +479,18 @@
     if (restoreRoomCode) {
       roomCode = restoreRoomCode;
       showRoom();
+    }
 
-      // The page just (re)loaded, so this is a new socket connection - rejoin the
-      // room's channel so we keep getting live player list updates. hostToken proves
-      // this browser is the one that actually created the room (see createRoomBtn).
+    // Re-establishes this socket as the room's host with the server. Called
+    // on every 'connect' below - not just the page's first load - because a
+    // dropped connection that silently reconnects on its own (a network
+    // blip, common on mobile) gets a brand-new socket.id without reloading
+    // the page. The server would otherwise keep pointing at the old, now-dead
+    // socket.id as the host, and every host action would fail with "Only the
+    // host can..." until someone thought to manually refresh.
+    function reclaimHost() {
+      if (!roomCode) return; // nothing to reclaim - no room created/restored yet
+
       const hostToken = localStorage.getItem('mt_hostToken');
       socket.emit('hostRejoin', { roomCode, hostToken }, (response) => {
         if (response && response.error) {
@@ -547,6 +555,8 @@
         }
       });
     }
+
+    socket.on('connect', reclaimHost);
 
     if (spotifyResult === 'connected') {
       document.getElementById('spotifyLoginSection').hidden = true;

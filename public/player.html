@@ -101,6 +101,7 @@
 
     socket.on('connect', () => {
       console.log('connected');
+      attemptRejoin();
     });
 
     function setTokens(count) {
@@ -453,10 +454,15 @@
       document.getElementById('stealSection').hidden = false;
     }
 
-    // On load, try to silently resume the last room/identity this browser
-    // joined instead of showing the join form - covers both a plain page
-    // refresh and a dropped connection reconnecting on its own.
-    (function attemptRejoin() {
+    // Tries to silently resume the last room/identity this browser joined,
+    // instead of showing the join form. Called on every 'connect' below -
+    // not just the page's first load - because a dropped connection that
+    // silently reconnects on its own (a network blip, common on mobile) gets
+    // a brand-new socket.id without reloading the page. Without re-running
+    // this, the server would have no idea which player that new socket.id
+    // belongs to, and the very next guess/steal would fail with a confusing
+    // "Only players can guess" until someone thought to manually refresh.
+    function attemptRejoin() {
       const storedRoomCode = localStorage.getItem('mt_roomCode');
       const storedPlayerId = localStorage.getItem('mt_playerId');
       if (!storedRoomCode || !storedPlayerId) return;
@@ -473,7 +479,7 @@
         document.getElementById('status').textContent = `Reconnected to room ${roomCode} as ${response.nickname}`;
         applySnapshot(response);
       });
-    })();
+    }
   </script>
 </body>
 </html>
