@@ -69,12 +69,25 @@
 
     // Persisted so a page reload or dropped connection can rejoin as the same
     // player (same timeline/tokens/turn order) instead of starting over.
+    // Saved to sessionStorage - unique per browser tab - as the primary
+    // record, so two player tabs open in the same browser (e.g. two people
+    // sharing one computer) can't silently overwrite each other's identity,
+    // which used to happen because both tabs shared the exact same
+    // localStorage keys: whichever player joined more recently would win,
+    // and the other tab's next reconnect would wrongly restore as them.
+    // localStorage is kept too, purely as a fallback for a brand-new tab
+    // that's never joined anything yet (sessionStorage starts empty for
+    // every new tab, so there's nothing there yet to prefer).
     function saveSession(rCode, pId) {
+      sessionStorage.setItem('mt_roomCode', rCode);
+      sessionStorage.setItem('mt_playerId', pId);
       localStorage.setItem('mt_roomCode', rCode);
       localStorage.setItem('mt_playerId', pId);
     }
 
     function clearSession() {
+      sessionStorage.removeItem('mt_roomCode');
+      sessionStorage.removeItem('mt_playerId');
       localStorage.removeItem('mt_roomCode');
       localStorage.removeItem('mt_playerId');
     }
@@ -463,8 +476,11 @@
     // belongs to, and the very next guess/steal would fail with a confusing
     // "Only players can guess" until someone thought to manually refresh.
     function attemptRejoin() {
-      const storedRoomCode = localStorage.getItem('mt_roomCode');
-      const storedPlayerId = localStorage.getItem('mt_playerId');
+      // sessionStorage first - this exact tab's own last-known identity, if
+      // it has one. Only a tab that's never joined anything yet (sessionStorage
+      // still empty) falls back to localStorage's "last joined anywhere" value.
+      const storedRoomCode = sessionStorage.getItem('mt_roomCode') || localStorage.getItem('mt_roomCode');
+      const storedPlayerId = sessionStorage.getItem('mt_playerId') || localStorage.getItem('mt_playerId');
       if (!storedRoomCode || !storedPlayerId) return;
 
       socket.emit('rejoinRoom', { roomCode: storedRoomCode, playerId: storedPlayerId }, (response) => {
@@ -478,6 +494,10 @@
         enterGame(response.nickname, response.timeline, response.tokens);
         document.getElementById('status').textContent = `Reconnected to room ${roomCode} as ${response.nickname}`;
         applySnapshot(response);
+        // Backfills this tab's own sessionStorage record - matters for a tab
+        // that only had an old localStorage-only session from before this
+        // fix existed, so it's fully migrated onto tab-scoped storage now.
+        saveSession(roomCode, playerId);
       });
     }
   </script>
